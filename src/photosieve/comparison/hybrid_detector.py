@@ -1,16 +1,24 @@
 
+# from dataclasses import dataclass
+
+# from photosieve.comparison.color_analyzer import (
+#     calculate_color_histogram,
+#     compare_color_histograms,
+# )
+# from photosieve.comparison.metadata_analyzer import (
+#     ImageMetadata,
+#     extract_image_metadata,
+# )
+# from photosieve.hasher import calculate_sha256
+# from photosieve.image_analyzer import calculate_phash
+# from photosieve.scanner import ImageInfo
+
+
 from dataclasses import dataclass
 
-from photosieve.comparison.color_analyzer import (
-    calculate_color_histogram,
-    compare_color_histograms,
-)
-from photosieve.comparison.metadata_analyzer import (
-    ImageMetadata,
-    extract_image_metadata,
-)
-from photosieve.hasher import calculate_sha256
-from photosieve.image_analyzer import calculate_phash
+from photosieve.comparison.analysis_cache import ImageAnalysisCache
+from photosieve.comparison.color_analyzer import compare_color_histograms
+from photosieve.comparison.metadata_analyzer import ImageMetadata
 from photosieve.scanner import ImageInfo
 
 
@@ -90,21 +98,25 @@ def _classify_similarity(
     return "NOT_SIMILAR"
 
 
+
 def compare_images(
     image_a: ImageInfo,
     image_b: ImageInfo,
+    cache: ImageAnalysisCache | None = None,
 ) -> HybridComparison:
     """
-    Compare two images using SHA-256, pHash, color histogram
-    and image metadata.
+    Compare two images using cached SHA-256, pHash,
+    color histogram and metadata results.
     """
-    sha256_a = calculate_sha256(image_a.path)
-    sha256_b = calculate_sha256(image_b.path)
+    analysis_cache = cache or ImageAnalysisCache()
+
+    sha256_a = analysis_cache.get_sha256(image_a)
+    sha256_b = analysis_cache.get_sha256(image_b)
 
     is_exact_duplicate = sha256_a == sha256_b
 
-    phash_a = calculate_phash(image_a.path)
-    phash_b = calculate_phash(image_b.path)
+    phash_a = analysis_cache.get_phash(image_a)
+    phash_b = analysis_cache.get_phash(image_b)
 
     phash_distance = int(phash_a - phash_b)
 
@@ -120,16 +132,16 @@ def compare_images(
             is_exact_duplicate=True,
         )
 
-    histogram_a = calculate_color_histogram(image_a.path)
-    histogram_b = calculate_color_histogram(image_b.path)
+    histogram_a = analysis_cache.get_color_histogram(image_a)
+    histogram_b = analysis_cache.get_color_histogram(image_b)
 
     color_similarity = compare_color_histograms(
         histogram_a,
         histogram_b,
     )
 
-    metadata_a = extract_image_metadata(image_a.path)
-    metadata_b = extract_image_metadata(image_b.path)
+    metadata_a = analysis_cache.get_metadata(image_a)
+    metadata_b = analysis_cache.get_metadata(image_b)
 
     metadata_similarity = _calculate_metadata_similarity(
         metadata_a,
@@ -165,16 +177,20 @@ def compare_images(
     )
 
 
+
+
 def find_hybrid_similarities(
     images: list[ImageInfo],
     phash_threshold: int = 12,
     minimum_score: float = POSSIBLE_THRESHOLD,
+    cache: ImageAnalysisCache | None = None,
 ) -> list[HybridComparison]:
     """
     Find potentially similar image pairs using hybrid analysis.
 
     SHA-256 identifies exact duplicates.
-    pHash filters candidate pairs before more expensive comparisons.
+    pHash filters candidate pairs.
+    Cached results prevent repeated file analysis.
     """
     if not 0 <= phash_threshold <= HASH_BITS:
         raise ValueError(
@@ -189,13 +205,15 @@ def find_hybrid_similarities(
     if len(images) < 2:
         return []
 
+    analysis_cache = cache or ImageAnalysisCache()
+
     hashes = [
-        calculate_phash(image.path)
+        analysis_cache.get_phash(image)
         for image in images
     ]
 
     sha256_hashes = [
-        calculate_sha256(image.path)
+        analysis_cache.get_sha256(image)
         for image in images
     ]
 
@@ -220,6 +238,7 @@ def find_hybrid_similarities(
             comparison = compare_images(
                 images[index_a],
                 images[index_b],
+                cache=analysis_cache,
             )
 
             if (
@@ -235,3 +254,4 @@ def find_hybrid_similarities(
             -comparison.similarity_score,
         ),
     )
+
