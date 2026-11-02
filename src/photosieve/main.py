@@ -5,8 +5,8 @@ from pathlib import Path
 
 from photosieve.scanner import ImageScanner
 from photosieve.duplicate_detector import find_exact_duplicates
-from photosieve.similarity_detector import find_similar_images
 from photosieve.similarity_detector import find_similarity_groups
+from photosieve.comparison.hybrid_detector import find_hybrid_similarities
 
 def format_size(size_bytes: int) -> str:
     size = float(size_bytes)
@@ -193,6 +193,153 @@ def run_similar(directory: Path, threshold: int) -> None:
 
 
 
+def run_analyze(
+    directory: Path,
+    phash_threshold: int,
+    minimum_score: float,
+) -> None:
+    scanner = ImageScanner()
+
+    print()
+    print("PhotoSieve - Intelligent Photo Analysis")
+    print("=" * 70)
+    print(f"Directory: {directory.expanduser().resolve()}")
+    print("Scanning images and analyzing similarities...")
+    print()
+
+    try:
+        result = scanner.scan(directory)
+
+        if len(result.images_found) < 2:
+            print("At least two valid images are required for analysis.")
+            print(f"Images found: {result.total_images}")
+            return
+
+        duplicate_groups = find_exact_duplicates(
+            result.images_found
+        )
+
+        comparisons = find_hybrid_similarities(
+            result.images_found,
+            phash_threshold=phash_threshold,
+            minimum_score=minimum_score,
+        )
+
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        print(f"Error: {error}")
+        return
+
+    similar_comparisons = [
+        comparison
+        for comparison in comparisons
+        if not comparison.is_exact_duplicate
+    ]
+
+    classification_counts = {
+        "VERY_HIGH_SIMILARITY": 0,
+        "HIGH_SIMILARITY": 0,
+        "POSSIBLE_SIMILARITY": 0,
+    }
+
+    for comparison in similar_comparisons:
+        classification_counts[comparison.classification] += 1
+
+    total_duplicate_files = sum(
+        len(group.images) - 1
+        for group in duplicate_groups
+    )
+
+    total_reclaimable = sum(
+        group.reclaimable_bytes
+        for group in duplicate_groups
+    )
+
+    print("SCAN SUMMARY")
+    print("-" * 70)
+    print(f"Directories scanned: {result.directories_scanned}")
+    print(f"Image files examined: {result.files_examined}")
+    print(f"Valid images: {result.total_images}")
+    print(f"Invalid images: {len(result.errors)}")
+    print(f"Total image size: {format_size(result.total_size_bytes)}")
+    print(f"Execution time: {result.duration_seconds:.2f} seconds")
+
+    print()
+    print("HYBRID ANALYSIS")
+    print("-" * 70)
+    print(f"Exact duplicate groups: {len(duplicate_groups)}")
+    print(f"Duplicate files: {total_duplicate_files}")
+    print(f"Very high similarity pairs: {classification_counts['VERY_HIGH_SIMILARITY']}")
+    print(f"High similarity pairs: {classification_counts['HIGH_SIMILARITY']}")
+    print(f"Possible similarity pairs: {classification_counts['POSSIBLE_SIMILARITY']}")
+    print(f"Potentially recoverable space: {format_size(total_reclaimable)}")
+
+    if duplicate_groups:
+        print()
+        print("EXACT DUPLICATES")
+        print("-" * 70)
+
+        for index, group in enumerate(duplicate_groups, start=1):
+            print()
+            print(f"GROUP {index}")
+            print(f"Files: {len(group.images)}")
+            print(f"Recoverable: {format_size(group.reclaimable_bytes)}")
+
+            for image in group.images:
+                relative_path = Path(image.path).relative_to(
+                    result.root_directory
+                )
+                print(f"  {relative_path}")
+
+    if similar_comparisons:
+        print()
+        print("SIMILAR IMAGE PAIRS")
+        print("-" * 70)
+
+        for index, comparison in enumerate(
+            similar_comparisons,
+            start=1,
+        ):
+            image_a = Path(comparison.image_a.path).relative_to(
+                result.root_directory
+            )
+            image_b = Path(comparison.image_b.path).relative_to(
+                result.root_directory
+            )
+
+            print()
+            print(f"PAIR {index}")
+            print(f"Classification: {comparison.classification}")
+            print(f"Similarity: {comparison.similarity_percent:.2f}%")
+            print(f"pHash distance: {comparison.phash_distance}/64")
+            print(f"Color similarity: {comparison.color_similarity:.2%}")
+            print(f"Metadata similarity: {comparison.metadata_similarity:.2%}")
+            print(f"  {image_a}")
+            print(f"  {image_b}")
+
+    if not duplicate_groups and not similar_comparisons:
+        print()
+        print("No duplicate or similar images found.")
+
+    if result.errors:
+        print()
+        print("SCAN ERRORS")
+        print("-" * 70)
+
+        for error in result.errors:
+            print(f"{error.path}: {error.message}")
+
+    print()
+    print("=" * 70)
+    print("No files were modified or deleted.")
+    print("Hybrid analysis completed.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="photosieve",
@@ -244,6 +391,32 @@ def main() -> None:
         help="Maximum Hamming distance (0-64, default: 6)",
     )
 
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Run a complete hybrid image analysis",
+    )
+
+    analyze_parser.add_argument(
+        "directory",
+        type=Path,
+        help="Directory containing images",
+    )
+
+    analyze_parser.add_argument(
+        "--phash-threshold",
+        type=int,
+        default=12,
+        help="Maximum pHash distance for candidate pairs (0-64, default: 12)",
+    )
+
+    analyze_parser.add_argument(
+        "--minimum-score",
+        type=float,
+        default=0.70,
+        help="Minimum hybrid similarity score (0.0-1.0, default: 0.70)",
+    )
+
+
     args = parser.parse_args()
 
     if args.command == "scan":
@@ -254,6 +427,13 @@ def main() -> None:
 
     elif args.command == "similar":
         run_similar(args.directory, args.threshold)
+
+    elif args.command == "analyze":
+        run_analyze(
+            args.directory,
+            args.phash_threshold,
+            args.minimum_score,
+        )
 
 
 if __name__ == "__main__":
