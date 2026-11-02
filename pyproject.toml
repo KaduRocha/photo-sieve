@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    "Pillow>=11.0"
+    "Pillow>=11.0",
+    "ImageHash>=4.3"
 ]
 
 [project.optional-dependencies]
