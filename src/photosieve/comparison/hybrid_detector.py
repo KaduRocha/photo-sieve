@@ -1,0 +1,237 @@
+
+from dataclasses import dataclass
+
+from photosieve.comparison.color_analyzer import (
+    calculate_color_histogram,
+    compare_color_histograms,
+)
+from photosieve.comparison.metadata_analyzer import (
+    ImageMetadata,
+    extract_image_metadata,
+)
+from photosieve.hasher import calculate_sha256
+from photosieve.image_analyzer import calculate_phash
+from photosieve.scanner import ImageInfo
+
+
+HASH_BITS = 64
+
+PHASH_WEIGHT = 0.55
+COLOR_WEIGHT = 0.35
+METADATA_WEIGHT = 0.10
+
+VERY_HIGH_THRESHOLD = 0.95
+HIGH_THRESHOLD = 0.85
+POSSIBLE_THRESHOLD = 0.70
+
+
+@dataclass
+class HybridComparison:
+    image_a: ImageInfo
+    image_b: ImageInfo
+    classification: str
+    similarity_score: float
+    phash_distance: int
+    color_similarity: float
+    metadata_similarity: float
+    is_exact_duplicate: bool
+
+    @property
+    def similarity_percent(self) -> float:
+        return round(self.similarity_score * 100, 2)
+
+
+def _calculate_metadata_similarity(
+    metadata_a: ImageMetadata,
+    metadata_b: ImageMetadata,
+) -> float:
+    """
+    Compare image aspect ratios.
+
+    Image dimensions may differ because of resizing or compression.
+    Therefore, aspect ratio is used instead of requiring equal dimensions.
+    """
+    ratio_a = metadata_a.aspect_ratio
+    ratio_b = metadata_b.aspect_ratio
+
+    if ratio_a <= 0 or ratio_b <= 0:
+        return 0.0
+
+    difference = abs(ratio_a - ratio_b) / max(ratio_a, ratio_b)
+
+    if difference <= 0.01:
+        return 1.0
+
+    if difference <= 0.03:
+        return 0.75
+
+    if difference <= 0.08:
+        return 0.40
+
+    return 0.0
+
+
+def _classify_similarity(
+    score: float,
+    is_exact_duplicate: bool,
+) -> str:
+    if is_exact_duplicate:
+        return "EXACT_DUPLICATE"
+
+    if score >= VERY_HIGH_THRESHOLD:
+        return "VERY_HIGH_SIMILARITY"
+
+    if score >= HIGH_THRESHOLD:
+        return "HIGH_SIMILARITY"
+
+    if score >= POSSIBLE_THRESHOLD:
+        return "POSSIBLE_SIMILARITY"
+
+    return "NOT_SIMILAR"
+
+
+def compare_images(
+    image_a: ImageInfo,
+    image_b: ImageInfo,
+) -> HybridComparison:
+    """
+    Compare two images using SHA-256, pHash, color histogram
+    and image metadata.
+    """
+    sha256_a = calculate_sha256(image_a.path)
+    sha256_b = calculate_sha256(image_b.path)
+
+    is_exact_duplicate = sha256_a == sha256_b
+
+    phash_a = calculate_phash(image_a.path)
+    phash_b = calculate_phash(image_b.path)
+
+    phash_distance = int(phash_a - phash_b)
+
+    if is_exact_duplicate:
+        return HybridComparison(
+            image_a=image_a,
+            image_b=image_b,
+            classification="EXACT_DUPLICATE",
+            similarity_score=1.0,
+            phash_distance=phash_distance,
+            color_similarity=1.0,
+            metadata_similarity=1.0,
+            is_exact_duplicate=True,
+        )
+
+    histogram_a = calculate_color_histogram(image_a.path)
+    histogram_b = calculate_color_histogram(image_b.path)
+
+    color_similarity = compare_color_histograms(
+        histogram_a,
+        histogram_b,
+    )
+
+    metadata_a = extract_image_metadata(image_a.path)
+    metadata_b = extract_image_metadata(image_b.path)
+
+    metadata_similarity = _calculate_metadata_similarity(
+        metadata_a,
+        metadata_b,
+    )
+
+    phash_similarity = (
+        HASH_BITS - phash_distance
+    ) / HASH_BITS
+
+    similarity_score = (
+        phash_similarity * PHASH_WEIGHT
+        + color_similarity * COLOR_WEIGHT
+        + metadata_similarity * METADATA_WEIGHT
+    )
+
+    similarity_score = max(0.0, min(1.0, similarity_score))
+
+    classification = _classify_similarity(
+        similarity_score,
+        is_exact_duplicate,
+    )
+
+    return HybridComparison(
+        image_a=image_a,
+        image_b=image_b,
+        classification=classification,
+        similarity_score=similarity_score,
+        phash_distance=phash_distance,
+        color_similarity=color_similarity,
+        metadata_similarity=metadata_similarity,
+        is_exact_duplicate=False,
+    )
+
+
+def find_hybrid_similarities(
+    images: list[ImageInfo],
+    phash_threshold: int = 12,
+    minimum_score: float = POSSIBLE_THRESHOLD,
+) -> list[HybridComparison]:
+    """
+    Find potentially similar image pairs using hybrid analysis.
+
+    SHA-256 identifies exact duplicates.
+    pHash filters candidate pairs before more expensive comparisons.
+    """
+    if not 0 <= phash_threshold <= HASH_BITS:
+        raise ValueError(
+            f"pHash threshold must be between 0 and {HASH_BITS}."
+        )
+
+    if not 0.0 <= minimum_score <= 1.0:
+        raise ValueError(
+            "Minimum score must be between 0.0 and 1.0."
+        )
+
+    if len(images) < 2:
+        return []
+
+    hashes = [
+        calculate_phash(image.path)
+        for image in images
+    ]
+
+    sha256_hashes = [
+        calculate_sha256(image.path)
+        for image in images
+    ]
+
+    comparisons = []
+
+    for index_a in range(len(images)):
+        for index_b in range(index_a + 1, len(images)):
+            is_exact_duplicate = (
+                sha256_hashes[index_a] == sha256_hashes[index_b]
+            )
+
+            phash_distance = int(
+                hashes[index_a] - hashes[index_b]
+            )
+
+            if (
+                not is_exact_duplicate
+                and phash_distance > phash_threshold
+            ):
+                continue
+
+            comparison = compare_images(
+                images[index_a],
+                images[index_b],
+            )
+
+            if (
+                comparison.is_exact_duplicate
+                or comparison.similarity_score >= minimum_score
+            ):
+                comparisons.append(comparison)
+
+    return sorted(
+        comparisons,
+        key=lambda comparison: (
+            not comparison.is_exact_duplicate,
+            -comparison.similarity_score,
+        ),
+    )
