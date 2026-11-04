@@ -197,6 +197,7 @@ def run_analyze(
     directory: Path,
     phash_threshold: int,
     minimum_score: float,
+    workers: int = 4,
 ) -> None:
     scanner = ImageScanner()
 
@@ -204,6 +205,7 @@ def run_analyze(
     print("PhotoSieve - Intelligent Photo Analysis")
     print("=" * 70)
     print(f"Directory: {directory.expanduser().resolve()}")
+    print(f"Parallel workers: {workers}")
     print("Scanning images and analyzing similarities...")
     print()
 
@@ -223,6 +225,7 @@ def run_analyze(
             result.images_found,
             phash_threshold=phash_threshold,
             minimum_score=minimum_score,
+            max_workers=workers,
         )
 
     except (
@@ -416,6 +419,12 @@ def main() -> None:
         help="Minimum hybrid similarity score (0.0-1.0, default: 0.70)",
     )
 
+    analyze_parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Maximum number of parallel workers (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -433,6 +442,7 @@ def main() -> None:
             args.directory,
             args.phash_threshold,
             args.minimum_score,
+            args.workers,
         )
 
 

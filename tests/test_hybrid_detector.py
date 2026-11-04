@@ -112,3 +112,53 @@ def test_rejects_invalid_phash_threshold(tmp_path):
 def test_rejects_invalid_minimum_score():
     with pytest.raises(ValueError):
         find_hybrid_similarities([], minimum_score=1.5)
+
+
+def test_parallel_results_match_sequential_results(tmp_path):
+    image_a = tmp_path / "original.png"
+    image_b = tmp_path / "modified.png"
+    image_c = tmp_path / "different.png"
+
+    Image.new("RGB", (256, 256), color="red").save(image_a)
+
+    modified = Image.new("RGB", (256, 256), color="red")
+    ImageDraw.Draw(modified).rectangle(
+        (0, 0, 3, 3),
+        fill="green",
+    )
+    modified.save(image_b)
+
+    Image.new("RGB", (256, 256), color="blue").save(image_c)
+
+    images = scan_images(tmp_path)
+
+    sequential = find_hybrid_similarities(
+        images,
+        max_workers=1,
+    )
+
+    parallel = find_hybrid_similarities(
+        images,
+        max_workers=4,
+    )
+
+    def normalize(results):
+        return [
+            (
+                result.image_a.path,
+                result.image_b.path,
+                result.classification,
+                result.similarity_score,
+            )
+            for result in results
+        ]
+
+    assert normalize(parallel) == normalize(sequential)
+
+
+def test_rejects_invalid_worker_count():
+    with pytest.raises(ValueError, match="Maximum workers"):
+        find_hybrid_similarities(
+            images=[],
+            max_workers=0,
+        )

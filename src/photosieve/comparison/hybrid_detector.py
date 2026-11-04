@@ -1,19 +1,5 @@
 
-# from dataclasses import dataclass
-
-# from photosieve.comparison.color_analyzer import (
-#     calculate_color_histogram,
-#     compare_color_histograms,
-# )
-# from photosieve.comparison.metadata_analyzer import (
-#     ImageMetadata,
-#     extract_image_metadata,
-# )
-# from photosieve.hasher import calculate_sha256
-# from photosieve.image_analyzer import calculate_phash
-# from photosieve.scanner import ImageInfo
-
-
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from photosieve.comparison.analysis_cache import ImageAnalysisCache
@@ -229,18 +215,34 @@ def _find_candidate_pairs(
     return sorted(candidate_pairs)
 
 
+def _prepare_image(
+    image: ImageInfo,
+    cache: ImageAnalysisCache,
+):
+    """
+    Calculate the initial features required for candidate generation.
+    """
+    return (
+        cache.get_phash(image),
+        cache.get_sha256(image),
+    )
+
+
 
 def find_hybrid_similarities(
     images: list[ImageInfo],
     phash_threshold: int = 12,
     minimum_score: float = POSSIBLE_THRESHOLD,
     cache: ImageAnalysisCache | None = None,
+    max_workers: int = 4,
 ) -> list[HybridComparison]:
     """
     Find potentially similar image pairs using hybrid analysis.
 
     SHA-256 identifies exact duplicates.
-    pHash filters candidate pairs.
+    pHash filters candidate pairs using BK-Tree.
+    Image analysis is performed concurrently with a bounded
+    number of workers.
     Cached results prevent repeated file analysis.
     """
     if not 0 <= phash_threshold <= HASH_BITS:
@@ -253,51 +255,66 @@ def find_hybrid_similarities(
             "Minimum score must be between 0.0 and 1.0."
         )
 
+    if max_workers < 1:
+        raise ValueError("Maximum workers must be at least 1.")
+
     if len(images) < 2:
         return []
 
     analysis_cache = cache or ImageAnalysisCache()
+    worker_count = min(max_workers, len(images))
 
-    hashes = [
-        analysis_cache.get_phash(image)
-        for image in images
-    ]
+    # Stage 1: Prepare image features concurrently.
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        prepared_features = list(
+            executor.map(
+                lambda image: _prepare_image(image, analysis_cache),
+                images,
+            )
+        )
 
-    sha256_hashes = [
-        analysis_cache.get_sha256(image)
-        for image in images
-    ]
+    hashes = [features[0] for features in prepared_features]
+    sha256_hashes = [features[1] for features in prepared_features]
 
-    comparisons = []
-
-
+    # Stage 2: Generate candidate pairs using BK-Tree.
     candidate_pairs = _find_candidate_pairs(
         hashes=hashes,
         sha256_hashes=sha256_hashes,
         phash_threshold=phash_threshold,
     )
 
-    comparisons = []
+    if not candidate_pairs:
+        return []
 
-    for index_a, index_b in candidate_pairs:
-        comparison = compare_images(
+    # Stage 3: Compare candidate pairs concurrently.
+    def compare_pair(pair: tuple[int, int]) -> HybridComparison:
+        index_a, index_b = pair
+
+        return compare_images(
             images[index_a],
             images[index_b],
             cache=analysis_cache,
         )
 
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        comparisons = list(
+            executor.map(compare_pair, candidate_pairs)
+        )
+
+    # Stage 4: Apply the minimum similarity score.
+    filtered_comparisons = [
+        comparison
+        for comparison in comparisons
         if (
             comparison.is_exact_duplicate
             or comparison.similarity_score >= minimum_score
-        ):
-            comparisons.append(comparison)
-
+        )
+    ]
 
     return sorted(
-        comparisons,
+        filtered_comparisons,
         key=lambda comparison: (
             not comparison.is_exact_duplicate,
             -comparison.similarity_score,
         ),
     )
-
