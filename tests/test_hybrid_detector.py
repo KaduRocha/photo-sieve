@@ -2,7 +2,6 @@
 import shutil
 
 import pytest
-
 from PIL import Image, ImageDraw
 
 from photosieve.comparison.hybrid_detector import (

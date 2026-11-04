@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import imagehash
-
 from PIL import Image, ImageOps
 
 

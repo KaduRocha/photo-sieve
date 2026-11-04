@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from photosieve.image_analyzer import calculate_phash
 from photosieve.scanner import ImageInfo
 
-
 HASH_BITS = 64
 
 

@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from photosieve.comparison.analysis_cache import ImageAnalysisCache
 from photosieve.comparison.color_analyzer import compare_color_histograms
 from photosieve.comparison.metadata_analyzer import ImageMetadata
+from photosieve.comparison.phash_index import BKTree
 from photosieve.scanner import ImageInfo
-
 
 HASH_BITS = 64
 
@@ -176,6 +176,57 @@ def compare_images(
         is_exact_duplicate=False,
     )
 
+def _to_integer_hash(image_hash) -> int:
+    """Convert an ImageHash or integer into an integer hash."""
+    if isinstance(image_hash, int):
+        return image_hash
+
+    return int(str(image_hash), 16)
+
+def _find_candidate_pairs(
+    hashes: list,
+    sha256_hashes: list[str],
+    phash_threshold: int,
+) -> list[tuple[int, int]]:
+    """
+    Generate candidate image pairs using BK-Tree indexing.
+
+    Exact duplicates are always included, independently
+    of the perceptual hash threshold.
+    """
+    index = BKTree()
+
+    for image_index, image_hash in enumerate(hashes):
+        index.add(_to_integer_hash(image_hash), image_index)
+
+    candidate_pairs = set()
+
+    for index_a, image_hash in enumerate(hashes):
+        matches = index.search(
+            _to_integer_hash(image_hash),
+            max_distance=phash_threshold,
+        )
+
+        for index_b, _ in matches:
+            if index_b > index_a:
+                candidate_pairs.add((index_a, index_b))
+
+    # Preserve exact duplicate detection even if the pHash
+    # threshold would otherwise exclude a pair.
+    exact_groups = {}
+
+    for image_index, file_hash in enumerate(sha256_hashes):
+        exact_groups.setdefault(file_hash, []).append(image_index)
+
+    for indexes in exact_groups.values():
+        if len(indexes) < 2:
+            continue
+
+        for position, index_a in enumerate(indexes):
+            for index_b in indexes[position + 1:]:
+                candidate_pairs.add((index_a, index_b))
+
+    return sorted(candidate_pairs)
 
 
 
@@ -219,33 +270,28 @@ def find_hybrid_similarities(
 
     comparisons = []
 
-    for index_a in range(len(images)):
-        for index_b in range(index_a + 1, len(images)):
-            is_exact_duplicate = (
-                sha256_hashes[index_a] == sha256_hashes[index_b]
-            )
 
-            phash_distance = int(
-                hashes[index_a] - hashes[index_b]
-            )
+    candidate_pairs = _find_candidate_pairs(
+        hashes=hashes,
+        sha256_hashes=sha256_hashes,
+        phash_threshold=phash_threshold,
+    )
 
-            if (
-                not is_exact_duplicate
-                and phash_distance > phash_threshold
-            ):
-                continue
+    comparisons = []
 
-            comparison = compare_images(
-                images[index_a],
-                images[index_b],
-                cache=analysis_cache,
-            )
+    for index_a, index_b in candidate_pairs:
+        comparison = compare_images(
+            images[index_a],
+            images[index_b],
+            cache=analysis_cache,
+        )
 
-            if (
-                comparison.is_exact_duplicate
-                or comparison.similarity_score >= minimum_score
-            ):
-                comparisons.append(comparison)
+        if (
+            comparison.is_exact_duplicate
+            or comparison.similarity_score >= minimum_score
+        ):
+            comparisons.append(comparison)
+
 
     return sorted(
         comparisons,

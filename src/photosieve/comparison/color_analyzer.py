@@ -3,7 +3,6 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-
 HISTOGRAM_BINS = 32
 
 # Weights for HSV channels.

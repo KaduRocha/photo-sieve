@@ -1,8 +1,8 @@
 
 from PIL import Image
 
-from photosieve.scanner import ImageScanner
 from photosieve.duplicate_detector import find_exact_duplicates
+from photosieve.scanner import ImageScanner
 
 
 def test_finds_exact_duplicates(tmp_path):

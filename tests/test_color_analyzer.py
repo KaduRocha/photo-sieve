@@ -1,6 +1,5 @@
 
 import pytest
-
 from PIL import Image
 
 from photosieve.comparison.color_analyzer import (

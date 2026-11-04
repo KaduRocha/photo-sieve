@@ -1,12 +1,12 @@
 
 import argparse
-
 from pathlib import Path
 
-from photosieve.scanner import ImageScanner
-from photosieve.duplicate_detector import find_exact_duplicates
-from photosieve.similarity_detector import find_similarity_groups
 from photosieve.comparison.hybrid_detector import find_hybrid_similarities
+from photosieve.duplicate_detector import find_exact_duplicates
+from photosieve.scanner import ImageScanner
+from photosieve.similarity_detector import find_similarity_groups
+
 
 def format_size(size_bytes: int) -> str:
     size = float(size_bytes)
@@ -56,7 +56,7 @@ def run_scan(directory: Path) -> None:
             )
 
             print(
-                f"{str(relative_path):<55} "
+                f"{relative_path!s:<55} "
                 f"{image.width}x{image.height} "
                 f"{format_size(image.size_bytes):>12}"
             )

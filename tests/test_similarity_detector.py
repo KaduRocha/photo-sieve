@@ -2,7 +2,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from PIL import Image
 
 from photosieve.scanner import ImageScanner

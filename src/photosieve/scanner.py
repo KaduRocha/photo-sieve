@@ -1,13 +1,11 @@
 
 import os
 import time
-
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
-
 
 SUPPORTED_EXTENSIONS = {
     ".jpg",
@@ -73,7 +71,7 @@ class ImageScanner:
 
         result = ScanResult(
             root_directory=str(root),
-            started_at=datetime.now(timezone.utc).isoformat(),
+            started_at=datetime.now(UTC).isoformat(),
         )
 
         def handle_walk_error(error: OSError) -> None:
