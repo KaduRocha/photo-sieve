@@ -145,3 +145,87 @@ def test_dedupe_delete_with_yes(photo_dir):
 
     assert (photo_dir / "a.png").exists()
     assert not (photo_dir / "a_copy.png").exists()
+
+
+def test_analyze_writes_report_and_validates_extension(photo_dir, tmp_path, capsys):
+    report = tmp_path / "out" / "r.html"
+
+    cli.run_analyze(photo_dir, 12, 0.7, 1, report_path=report)
+
+    assert report.exists()
+    assert "Report written" in capsys.readouterr().out
+
+    cli.run_analyze(photo_dir, 12, 0.7, 1, report_path=tmp_path / "r.pdf")
+    out = capsys.readouterr().out
+
+    assert "Formato de relatório não suportado" in out
+    assert "HYBRID ANALYSIS" not in out  # falhou cedo, antes de analisar
+
+
+def test_analyze_uses_persistent_cache(photo_dir, tmp_path):
+    db = tmp_path / "cache" / "c.db"
+
+    cli.run_analyze(photo_dir, 12, 0.7, 1, cache_path=db)
+
+    assert db.exists()
+
+    from photosieve.comparison.persistent_store import PersistentStore
+
+    with PersistentStore(db) as store:
+        assert store.count() > 0
+
+
+def test_analyze_with_crop_detection_runs(photo_dir, capsys):
+    cli.run_analyze(photo_dir, 12, 0.7, 1, detect_crops=True)
+
+    assert "Crop detection: on" in capsys.readouterr().out
+
+
+def test_dedupe_similar_dry_run_and_apply(tmp_path, capsys):
+    from tests.conftest import make_scene
+
+    directory = tmp_path / "lib"
+    directory.mkdir()
+    big = make_scene(directory / "big.png", seed=3, size=(400, 400))
+    big.resize((200, 200)).save(directory / "small.jpg", quality=80)
+
+    cli.run_dedupe(directory, similar=True)
+    out = capsys.readouterr().out
+
+    assert "% similar" in out
+    assert (directory / "small.jpg").exists()
+
+    cli.run_dedupe(directory, similar=True, apply=True)
+
+    assert not (directory / "small.jpg").exists()
+    assert (tmp_path / "lib_photosieve_duplicates" / "small.jpg").exists()
+    assert (directory / "big.png").exists()
+
+
+def test_dedupe_similar_refuses_delete(photo_dir, capsys):
+    cli.run_dedupe(photo_dir, similar=True, delete=True, apply=True, assume_yes=True)
+
+    assert "--delete não pode ser usado com --similar" in capsys.readouterr().out
+    assert (photo_dir / "a_copy.png").exists()
+
+
+def test_main_wires_new_options(monkeypatch, tmp_path):
+    captured = {}
+
+    monkeypatch.setattr(cli, "run_analyze", lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["photosieve", "analyze", "/tmp", "--report", "r.json", "--detect-crops",
+         "--crop-threshold", "5", "--no-cache"],
+    )
+    cli.main()
+
+    assert captured["cache_path"] is None
+    assert str(captured["report_path"]) == "r.json"
+    assert captured["detect_crops"] is True
+    assert captured["crop_threshold"] == 5
+
+    monkeypatch.setattr("sys.argv", ["photosieve", "analyze", "/tmp", "--cache-db", str(tmp_path / "x.db")])
+    cli.main()
+
+    assert captured["cache_path"] == tmp_path / "x.db"

@@ -30,3 +30,21 @@ def photo_dir(tmp_path):
     (directory / "broken.jpg").write_bytes(b"not an image")
 
     return directory
+
+
+def make_scene(path, seed, size=(400, 400)):
+    """Imagem sintética com formas aleatórias (determinística pela semente)."""
+    import random
+
+    rng = random.Random(seed)
+    image = Image.new("RGB", size, tuple(rng.randint(20, 235) for _ in range(3)))
+    draw = ImageDraw.Draw(image)
+
+    for _ in range(18):
+        color = tuple(rng.randint(20, 245) for _ in range(3))
+        x1, y1 = rng.randint(0, size[0] - 1), rng.randint(0, size[1] - 1)
+        x2, y2 = rng.randint(x1, size[0]), rng.randint(y1, size[1])
+        draw.rectangle((x1, y1, x2, y2), fill=color)
+
+    image.save(path)
+    return image

@@ -2,9 +2,11 @@
 Ações sobre duplicatas exatas: mover para quarentena ou excluir.
 
 Princípios de segurança:
-- Apenas duplicatas EXATAS (SHA-256 idêntico) são tratadas.
+- Duplicatas EXATAS (SHA-256 idêntico) podem ser movidas ou excluídas.
+- Imagens apenas SEMELHANTES só podem ir para a quarentena (nunca excluídas)
+  e a cópia mantida é sempre a de maior qualidade.
 - Sempre existe uma cópia preservada por grupo.
-- O SHA-256 é reverificado imediatamente antes de qualquer ação.
+- Antes de agir, o SHA-256 (exatas) ou o tamanho (semelhantes) é reverificado.
 - Por padrão nada é alterado (dry-run); o chamador precisa pedir `apply`.
 - A ação padrão é mover para quarentena (reversível), não excluir.
 """
@@ -14,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from photosieve.comparison.hybrid_detector import HybridComparison
 from photosieve.duplicate_detector import DuplicateGroup
 from photosieve.hasher import calculate_sha256
 from photosieve.scanner import ImageInfo
@@ -29,6 +32,8 @@ class PlannedAction:
     kept: ImageInfo
     target: ImageInfo
     destination: Path | None  # None quando a ação é DELETE
+    exact: bool = True  # False: apenas semelhante (sem igualdade de bytes)
+    similarity_percent: float | None = None
 
 
 @dataclass
@@ -49,6 +54,19 @@ class ActionReport:
     def bytes_affected(self) -> int:
         source = self.processed if self.applied else self.actions
         return sum(action.target.size_bytes for action in source)
+
+
+def image_quality_key(image: ImageInfo) -> tuple:
+    """Maior resolução, depois maior arquivo, depois caminho mais curto."""
+    return (image.width * image.height, image.size_bytes, -len(image.path))
+
+
+def choose_best_quality(images: list[ImageInfo]) -> ImageInfo:
+    """Escolhe a imagem de melhor qualidade de forma determinística."""
+    return max(
+        sorted(images, key=lambda image: image.path),
+        key=image_quality_key,
+    )
 
 
 def choose_image_to_keep(group: DuplicateGroup) -> ImageInfo:
@@ -107,6 +125,90 @@ def plan_duplicate_actions(
     return actions
 
 
+def plan_similar_actions(
+    comparisons: list[HybridComparison],
+    root_directory: str | Path,
+    quarantine_directory: str | Path | None = None,
+    minimum_score: float = 0.90,
+) -> list[PlannedAction]:
+    """
+    Planeja a quarentena de imagens semelhantes, mantendo a de maior qualidade.
+
+    Usa agrupamento em estrela: cada imagem mantida só remove imagens que
+    têm um par DIRETO com ela acima de `minimum_score`. Isso evita
+    encadeamento (A≈B e B≈C não implica A≈C).
+    """
+    if not 0.0 <= minimum_score <= 1.0:
+        raise ValueError("Minimum score must be between 0.0 and 1.0.")
+
+    root = Path(root_directory).resolve()
+    quarantine = (
+        Path(quarantine_directory).expanduser().resolve()
+        if quarantine_directory
+        else default_quarantine_directory(root)
+    )
+
+    if quarantine == root or root in quarantine.parents:
+        raise ValueError(
+            "A pasta de quarentena não pode ficar dentro do diretório analisado."
+        )
+
+    images: dict[str, ImageInfo] = {}
+    neighbors: dict[str, dict[str, HybridComparison]] = {}
+
+    for comparison in comparisons:
+        if not (
+            comparison.is_exact_duplicate
+            or comparison.similarity_score >= minimum_score
+        ):
+            continue
+
+        for image, other in (
+            (comparison.image_a, comparison.image_b),
+            (comparison.image_b, comparison.image_a),
+        ):
+            images[image.path] = image
+            neighbors.setdefault(image.path, {})[other.path] = comparison
+
+    ordered = sorted(
+        images.values(),
+        key=lambda image: (tuple(-v for v in image_quality_key(image)), image.path),
+    )
+
+    handled: set[str] = set()
+    actions = []
+
+    for keeper in ordered:
+        # Uma imagem já destinada à quarentena nunca pode ser representante
+        # de outra: isso encadearia remoções (A≈B≈C) e poderia eliminar
+        # todas as cópias de C.
+        if keeper.path in handled:
+            continue
+
+        # Todas as imagens anteriores já foram tratadas, então qualquer
+        # vizinho ainda livre tem qualidade menor ou igual à do keeper.
+        handled.add(keeper.path)
+
+        for other_path, comparison in sorted(neighbors[keeper.path].items()):
+            if other_path in handled:
+                continue
+
+            handled.add(other_path)
+            target = images[other_path]
+
+            actions.append(
+                PlannedAction(
+                    kept=keeper,
+                    target=target,
+                    destination=quarantine / Path(target.path).resolve().relative_to(root),
+                    exact=comparison.is_exact_duplicate,
+                    similarity_percent=comparison.similarity_percent,
+                )
+            )
+
+    return actions
+
+
 def execute_actions(
     actions: list[PlannedAction],
     kind: ActionKind = ActionKind.MOVE,
@@ -119,6 +221,11 @@ def execute_actions(
     precedida da reverificação do SHA-256 da cópia mantida e da alvo;
     se divergirem, a ação é registrada como falha e ignorada.
     """
+    if kind is ActionKind.DELETE and any(not a.exact for a in actions):
+        raise ValueError(
+            "Imagens apenas semelhantes não podem ser excluídas; use a quarentena."
+        )
+
     report = ActionReport(kind=kind, applied=apply, actions=list(actions))
 
     if not apply:
@@ -129,11 +236,18 @@ def execute_actions(
 
         try:
             # Reverifica sem cache: o arquivo pode ter mudado desde a varredura.
-            if (
-                calculate_sha256(action.kept.path)
-                != calculate_sha256(target_path)
+            if action.exact:
+                if (
+                    calculate_sha256(action.kept.path)
+                    != calculate_sha256(target_path)
+                ):
+                    raise RuntimeError("Os arquivos não são mais idênticos.")
+
+            elif (
+                Path(action.kept.path).stat().st_size != action.kept.size_bytes
+                or target_path.stat().st_size != action.target.size_bytes
             ):
-                raise RuntimeError("Os arquivos não são mais idênticos.")
+                raise RuntimeError("O arquivo mudou desde a análise.")
 
             if kind is ActionKind.DELETE:
                 target_path.unlink()

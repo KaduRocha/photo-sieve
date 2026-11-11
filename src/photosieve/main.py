@@ -1,15 +1,29 @@
 import argparse
+import sqlite3
 from pathlib import Path
 
 from photosieve import reporter
 from photosieve.comparison.analysis_cache import ImageAnalysisCache
-from photosieve.comparison.hybrid_detector import find_hybrid_similarities
+from photosieve.comparison.hybrid_detector import (
+    CROP_PHASH_THRESHOLD,
+    find_hybrid_similarities,
+)
+from photosieve.comparison.persistent_store import (
+    DEFAULT_CACHE_PATH,
+    PersistentStore,
+)
 from photosieve.duplicate_detector import find_exact_duplicates
 from photosieve.file_manager import (
     ActionKind,
     default_quarantine_directory,
     execute_actions,
     plan_duplicate_actions,
+    plan_similar_actions,
+)
+from photosieve.report_exporter import (
+    AnalysisReport,
+    validate_report_path,
+    write_report,
 )
 from photosieve.reporter import format_size
 from photosieve.scanner import ImageScanner
@@ -184,17 +198,28 @@ def run_analyze(
     phash_threshold: int,
     minimum_score: float,
     workers: int = 4,
+    cache_path: Path | None = None,
+    report_path: Path | None = None,
+    detect_crops: bool = False,
+    crop_threshold: int = CROP_PHASH_THRESHOLD,
 ) -> None:
     scanner = ImageScanner()
     width = 70
+    store = None
 
     reporter.print_header("PhotoSieve - Intelligent Photo Analysis", width)
     print(f"Directory: {directory.expanduser().resolve()}")
     print(f"Parallel workers: {workers}")
+    print(f"Crop detection: {'on' if detect_crops else 'off'}")
+    print(f"Persistent cache: {cache_path if cache_path else 'off'}")
     print("Scanning images and analyzing similarities...")
     print()
 
     try:
+        if report_path is not None:
+            # Falha cedo, antes de uma análise potencialmente longa.
+            report_path = validate_report_path(report_path)
+
         result = scanner.scan(directory)
 
         if len(result.images_found) < 2:
@@ -202,9 +227,12 @@ def run_analyze(
             print(f"Images found: {result.total_images}")
             return
 
+        if cache_path is not None:
+            store = PersistentStore(cache_path)
+
         # Cache compartilhado: o SHA-256 calculado na busca de duplicatas
         # exatas é reaproveitado pela análise híbrida.
-        analysis_cache = ImageAnalysisCache()
+        analysis_cache = ImageAnalysisCache(store)
 
         duplicate_groups = find_exact_duplicates(
             result.images_found,
@@ -217,6 +245,8 @@ def run_analyze(
             minimum_score=minimum_score,
             cache=analysis_cache,
             max_workers=workers,
+            detect_crops=detect_crops,
+            crop_threshold=crop_threshold,
         )
 
     except (
@@ -225,9 +255,14 @@ def run_analyze(
         OSError,
         RuntimeError,
         ValueError,
+        sqlite3.Error,
     ) as error:
         print(f"Error: {error}")
         return
+
+    finally:
+        if store is not None:
+            store.close()
 
     similar_comparisons = [
         comparison
@@ -290,6 +325,8 @@ def run_analyze(
             print(f"pHash distance: {comparison.phash_distance}/64")
             print(f"Color similarity: {comparison.color_similarity:.2%}")
             print(f"Metadata similarity: {comparison.metadata_similarity:.2%}")
+            if comparison.is_crop_match:
+                print(f"Crop match: yes (window distance {comparison.crop_distance}/64)")
             print(f"  {image_a}")
             print(f"  {image_b}")
 
@@ -298,6 +335,30 @@ def run_analyze(
         print("No duplicate or similar images found.")
 
     reporter.print_scan_errors(result, width)
+
+    if report_path is not None:
+        try:
+            written = write_report(
+                AnalysisReport(
+                    root_directory=result.root_directory,
+                    parameters={
+                        "phash_threshold": phash_threshold,
+                        "minimum_score": minimum_score,
+                        "workers": workers,
+                        "detect_crops": detect_crops,
+                        "crop_threshold": crop_threshold,
+                    },
+                    scan=result,
+                    duplicate_groups=duplicate_groups,
+                    comparisons=comparisons,
+                ),
+                report_path,
+            )
+            print()
+            print(f"Report written: {written}")
+        except OSError as error:
+            print(f"Error writing report: {error}")
+
     reporter.print_footer("Hybrid analysis completed.", width)
 
 
@@ -307,18 +368,33 @@ def run_dedupe(
     delete: bool = False,
     apply: bool = False,
     assume_yes: bool = False,
+    similar: bool = False,
+    minimum_score: float = 0.90,
+    phash_threshold: int = 12,
+    workers: int = 4,
+    cache_path: Path | None = None,
+    detect_crops: bool = False,
+    crop_threshold: int = CROP_PHASH_THRESHOLD,
 ) -> None:
     scanner = ImageScanner()
     kind = ActionKind.DELETE if delete else ActionKind.MOVE
+    store = None
 
     reporter.print_header("PhotoSieve - Duplicate Cleanup")
     print(f"Directory: {directory.expanduser().resolve()}")
     print(f"Action: {kind.value.upper()}")
+    print(f"Scope: {'exact + similar images' if similar else 'exact duplicates'}")
     print(f"Mode: {'APPLY' if apply else 'DRY-RUN (no files will be changed)'}")
 
     try:
+        if similar and delete:
+            raise ValueError(
+                "--delete não pode ser usado com --similar: "
+                "imagens semelhantes só podem ir para a quarentena."
+            )
+
         result = scanner.scan(directory)
-        groups = find_exact_duplicates(result.images_found)
+        groups = []
 
         if kind is ActionKind.MOVE:
             quarantine = quarantine_directory or default_quarantine_directory(
@@ -328,12 +404,38 @@ def run_dedupe(
         else:
             quarantine = None
 
-        actions = plan_duplicate_actions(
-            groups,
-            result.root_directory,
-            kind=kind,
-            quarantine_directory=quarantine,
-        )
+        if cache_path is not None:
+            store = PersistentStore(cache_path)
+
+        analysis_cache = ImageAnalysisCache(store)
+
+        if similar:
+            comparisons = find_hybrid_similarities(
+                result.images_found,
+                phash_threshold=phash_threshold,
+                minimum_score=minimum_score,
+                cache=analysis_cache,
+                max_workers=workers,
+                detect_crops=detect_crops,
+                crop_threshold=crop_threshold,
+            )
+            actions = plan_similar_actions(
+                comparisons,
+                result.root_directory,
+                quarantine_directory=quarantine,
+                minimum_score=minimum_score,
+            )
+        else:
+            groups = find_exact_duplicates(
+                result.images_found,
+                cache=analysis_cache,
+            )
+            actions = plan_duplicate_actions(
+                groups,
+                result.root_directory,
+                kind=kind,
+                quarantine_directory=quarantine,
+            )
 
     except (
         FileNotFoundError,
@@ -341,13 +443,21 @@ def run_dedupe(
         OSError,
         RuntimeError,
         ValueError,
+        sqlite3.Error,
     ) as error:
         print(f"Error: {error}")
         return
 
+    finally:
+        if store is not None:
+            store.close()
+
     print()
     reporter.print_section("PLAN")
-    print(f"Duplicate groups: {len(groups)}")
+
+    if not similar:
+        print(f"Duplicate groups: {len(groups)}")
+
     print(f"Files to {kind.value}: {len(actions)}")
     print(
         f"Space affected: {format_size(sum(a.target.size_bytes for a in actions))}"
@@ -356,13 +466,22 @@ def run_dedupe(
     for action in actions:
         kept = reporter.relative_path(action.kept.path, result.root_directory)
         target = reporter.relative_path(action.target.path, result.root_directory)
+        detail = ""
+
+        if similar:
+            detail = (
+                "  (exact)"
+                if action.exact
+                else f"  ({action.similarity_percent:.2f}% similar)"
+            )
+
         print()
         print(f"  KEEP    {kept}")
-        print(f"  {kind.value.upper():<7} {target}")
+        print(f"  {kind.value.upper():<7} {target}{detail}")
 
     if not actions:
         print()
-        print("No exact duplicates found. Nothing to do.")
+        print("Nothing to do.")
         return
 
     if not apply:
@@ -394,6 +513,38 @@ def run_dedupe(
     print()
     print("=" * 60)
     print("Cleanup completed.")
+
+
+def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--detect-crops",
+        action="store_true",
+        help="Also detect images that are crops of others (slower, more memory)",
+    )
+    parser.add_argument(
+        "--crop-threshold",
+        type=_bounded_int(0, 64),
+        default=CROP_PHASH_THRESHOLD,
+        help=f"Maximum pHash distance for crop matches (default: {CROP_PHASH_THRESHOLD})",
+    )
+
+
+def _add_cache_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cache-db",
+        type=Path,
+        default=DEFAULT_CACHE_PATH,
+        help=f"SQLite cache of analysis results (default: {DEFAULT_CACHE_PATH})",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Do not read or write the persistent cache",
+    )
+
+
+def _cache_path(args: argparse.Namespace) -> Path | None:
+    return None if args.no_cache else args.cache_db
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -460,6 +611,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=4,
         help="Maximum number of parallel workers (>= 1, default: 4)",
     )
+    analyze_parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="Write a report; format by extension: .json, .csv or .html",
+    )
+    _add_crop_arguments(analyze_parser)
+    _add_cache_arguments(analyze_parser)
 
     dedupe_parser = subparsers.add_parser(
         "dedupe",
@@ -489,6 +648,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the confirmation prompt when deleting",
     )
+    dedupe_parser.add_argument(
+        "--similar",
+        action="store_true",
+        help="Also quarantine visually similar images, keeping the best quality "
+        "(highest resolution, then size). Never combined with --delete",
+    )
+    dedupe_parser.add_argument(
+        "--similar-min-score",
+        type=_score_range,
+        default=0.90,
+        help="Minimum similarity to act on with --similar (0.0-1.0, default: 0.90)",
+    )
+    dedupe_parser.add_argument(
+        "--phash-threshold",
+        type=_bounded_int(0, 64),
+        default=12,
+        help="Maximum pHash distance for candidate pairs with --similar (default: 12)",
+    )
+    dedupe_parser.add_argument(
+        "--workers",
+        type=_bounded_int(1),
+        default=4,
+        help="Maximum number of parallel workers (>= 1, default: 4)",
+    )
+    _add_crop_arguments(dedupe_parser)
+    _add_cache_arguments(dedupe_parser)
 
     return parser
 
@@ -511,6 +696,10 @@ def main() -> None:
             args.phash_threshold,
             args.minimum_score,
             args.workers,
+            cache_path=_cache_path(args),
+            report_path=args.report,
+            detect_crops=args.detect_crops,
+            crop_threshold=args.crop_threshold,
         )
 
     elif args.command == "dedupe":
@@ -520,6 +709,13 @@ def main() -> None:
             delete=args.delete,
             apply=args.apply,
             assume_yes=args.yes,
+            similar=args.similar,
+            minimum_score=args.similar_min_score,
+            phash_threshold=args.phash_threshold,
+            workers=args.workers,
+            cache_path=_cache_path(args),
+            detect_crops=args.detect_crops,
+            crop_threshold=args.crop_threshold,
         )
 
 

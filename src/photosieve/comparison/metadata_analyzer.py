@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PIL import ExifTags, Image, ImageOps
 
+import photosieve.formats  # noqa: F401  (registra HEIC, se disponível)
+
 
 @dataclass
 class ImageMetadata:

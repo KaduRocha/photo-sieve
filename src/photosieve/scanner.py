@@ -7,16 +7,7 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-SUPPORTED_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".gif",
-}
+from photosieve.formats import SUPPORTED_EXTENSIONS
 
 
 @dataclass

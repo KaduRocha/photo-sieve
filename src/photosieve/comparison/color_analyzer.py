@@ -3,6 +3,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+import photosieve.formats  # noqa: F401  (registra HEIC, se disponível)
+
 HISTOGRAM_BINS = 32
 
 # Weights for HSV channels.
