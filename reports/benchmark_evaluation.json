@@ -1,0 +1,25 @@
+{
+    "dataset": "/home/einstein/Projeto/photo-sieve/data/benchmark_500",
+    "parameters": {
+        "workers": 8,
+        "phash_threshold": 12,
+        "minimum_score": 0.7
+    },
+    "totals": {
+        "images": 500,
+        "possible_pairs": 124750,
+        "expected_positive_pairs": 600,
+        "detected_pairs": 600,
+        "true_positives": 600,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "true_negatives": 124150
+    },
+    "metrics": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1_score": 1.0
+    },
+    "false_positives": [],
+    "false_negatives": []
+}

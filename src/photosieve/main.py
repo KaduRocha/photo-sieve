@@ -1,31 +1,65 @@
-
 import argparse
 from pathlib import Path
 
+from photosieve import reporter
+from photosieve.comparison.analysis_cache import ImageAnalysisCache
 from photosieve.comparison.hybrid_detector import find_hybrid_similarities
 from photosieve.duplicate_detector import find_exact_duplicates
+from photosieve.file_manager import (
+    ActionKind,
+    default_quarantine_directory,
+    execute_actions,
+    plan_duplicate_actions,
+)
+from photosieve.reporter import format_size
 from photosieve.scanner import ImageScanner
 from photosieve.similarity_detector import find_similarity_groups
 
+__all__ = ["format_size", "main"]
 
-def format_size(size_bytes: int) -> str:
-    size = float(size_bytes)
 
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024:
-            return f"{size:.2f} {unit}"
+def _bounded_int(minimum: int, maximum: int | None = None):
+    """Cria um tipo argparse que valida um inteiro dentro de um intervalo."""
 
-        size /= 1024
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                f"'{value}' não é um inteiro válido."
+            ) from error
 
-    return f"{size:.2f} PB"
+        if number < minimum or (maximum is not None and number > maximum):
+            limit = f"{minimum}-{maximum}" if maximum is not None else f">= {minimum}"
+            raise argparse.ArgumentTypeError(
+                f"valor {number} fora do intervalo permitido ({limit})."
+            )
+
+        return number
+
+    return parse
+
+
+def _score_range(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"'{value}' não é um número válido."
+        ) from error
+
+    if not 0.0 <= number <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"valor {number} fora do intervalo permitido (0.0-1.0)."
+        )
+
+    return number
 
 
 def run_scan(directory: Path) -> None:
     scanner = ImageScanner()
 
-    print()
-    print("PhotoSieve - Image Scanner")
-    print("=" * 60)
+    reporter.print_header("PhotoSieve - Image Scanner")
 
     try:
         result = scanner.scan(directory)
@@ -36,23 +70,16 @@ def run_scan(directory: Path) -> None:
 
     print(f"Directory: {result.root_directory}")
     print()
-    print("SCAN RESULTS")
-    print("-" * 60)
-    print(f"Directories scanned: {result.directories_scanned}")
-    print(f"Image files examined: {result.files_examined}")
-    print(f"Valid images: {result.total_images}")
-    print(f"Invalid images: {len(result.errors)}")
-    print(f"Total image size: {format_size(result.total_size_bytes)}")
-    print(f"Execution time: {result.duration_seconds:.2f} seconds")
+    reporter.print_section("SCAN RESULTS")
+    reporter.print_scan_summary(result)
 
     if result.images_found:
         print()
-        print("IMAGE INVENTORY")
-        print("-" * 60)
+        reporter.print_section("IMAGE INVENTORY")
 
         for image in result.images_found:
-            relative_path = Path(image.path).relative_to(
-                result.root_directory
+            relative_path = reporter.relative_path(
+                image.path, result.root_directory
             )
 
             print(
@@ -68,9 +95,7 @@ def run_scan(directory: Path) -> None:
 def run_duplicates(directory: Path) -> None:
     scanner = ImageScanner()
 
-    print()
-    print("PhotoSieve - Duplicate Detection")
-    print("=" * 60)
+    reporter.print_header("PhotoSieve - Duplicate Detection")
     print(f"Directory: {directory.expanduser().resolve()}")
     print("Scanning and calculating SHA-256...")
     print()
@@ -83,54 +108,29 @@ def run_duplicates(directory: Path) -> None:
         print(f"Error: {error}")
         return
 
-    total_duplicates = sum(
-        len(group.images) - 1
-        for group in duplicate_groups
-    )
+    total_duplicates = sum(len(group.images) - 1 for group in duplicate_groups)
+    total_reclaimable = sum(group.reclaimable_bytes for group in duplicate_groups)
 
-    total_reclaimable = sum(
-        group.reclaimable_bytes
-        for group in duplicate_groups
-    )
-
-    print("DUPLICATE ANALYSIS")
-    print("-" * 60)
+    reporter.print_section("DUPLICATE ANALYSIS")
     print(f"Images analyzed: {result.total_images}")
     print(f"Duplicate groups: {len(duplicate_groups)}")
     print(f"Duplicate files: {total_duplicates}")
     print(f"Potential space recovery: {format_size(total_reclaimable)}")
 
     for index, group in enumerate(duplicate_groups, start=1):
-        print()
-        print(f"GROUP {index}")
-        print("-" * 60)
-        print(f"SHA-256: {group.sha256}")
-        print(f"Files: {len(group.images)}")
-        print(f"Recoverable: {format_size(group.reclaimable_bytes)}")
-
-        for image in group.images:
-            relative_path = Path(image.path).relative_to(
-                result.root_directory
-            )
-            print(f"  {relative_path}")
+        reporter.print_duplicate_group(index, group, result.root_directory)
 
     if not duplicate_groups:
         print()
         print("No exact duplicates found.")
 
-    print()
-    print("=" * 60)
-    print("No files were modified or deleted.")
-    print("Duplicate analysis completed.")
-
+    reporter.print_footer("Duplicate analysis completed.")
 
 
 def run_similar(directory: Path, threshold: int) -> None:
     scanner = ImageScanner()
 
-    print()
-    print("PhotoSieve - Visual Similarity Detection")
-    print("=" * 60)
+    reporter.print_header("PhotoSieve - Visual Similarity Detection")
     print(f"Directory: {directory.expanduser().resolve()}")
     print(f"Similarity threshold: {threshold}/64")
     print("Scanning and calculating perceptual hashes...")
@@ -154,13 +154,9 @@ def run_similar(directory: Path, threshold: int) -> None:
         print(f"Error: {error}")
         return
 
-    grouped_images = sum(
-        len(group.images)
-        for group in groups
-    )
+    grouped_images = sum(len(group.images) for group in groups)
 
-    print("SIMILARITY ANALYSIS")
-    print("-" * 60)
+    reporter.print_section("SIMILARITY ANALYSIS")
     print(f"Images analyzed: {result.total_images}")
     print(f"Similarity groups: {len(groups)}")
     print(f"Images in groups: {grouped_images}")
@@ -174,23 +170,13 @@ def run_similar(directory: Path, threshold: int) -> None:
         print(f"Classification: {group.classification}")
         print(f"Maximum distance: {group.max_distance}/64")
         print(f"Similarity: {group.similarity_percent:.2f}%")
-
-        for image in group.images:
-            relative_path = Path(image.path).relative_to(
-                result.root_directory
-            )
-
-            print(f"  {relative_path}")
+        reporter.print_image_paths(group.images, result.root_directory)
 
     if not groups:
         print()
         print("No similar image groups found.")
 
-    print()
-    print("=" * 60)
-    print("No files were modified or deleted.")
-    print("Similarity analysis completed.")
-
+    reporter.print_footer("Similarity analysis completed.")
 
 
 def run_analyze(
@@ -200,10 +186,9 @@ def run_analyze(
     workers: int = 4,
 ) -> None:
     scanner = ImageScanner()
+    width = 70
 
-    print()
-    print("PhotoSieve - Intelligent Photo Analysis")
-    print("=" * 70)
+    reporter.print_header("PhotoSieve - Intelligent Photo Analysis", width)
     print(f"Directory: {directory.expanduser().resolve()}")
     print(f"Parallel workers: {workers}")
     print("Scanning images and analyzing similarities...")
@@ -217,14 +202,20 @@ def run_analyze(
             print(f"Images found: {result.total_images}")
             return
 
+        # Cache compartilhado: o SHA-256 calculado na busca de duplicatas
+        # exatas é reaproveitado pela análise híbrida.
+        analysis_cache = ImageAnalysisCache()
+
         duplicate_groups = find_exact_duplicates(
-            result.images_found
+            result.images_found,
+            cache=analysis_cache,
         )
 
         comparisons = find_hybrid_similarities(
             result.images_found,
             phash_threshold=phash_threshold,
             minimum_score=minimum_score,
+            cache=analysis_cache,
             max_workers=workers,
         )
 
@@ -253,28 +244,14 @@ def run_analyze(
     for comparison in similar_comparisons:
         classification_counts[comparison.classification] += 1
 
-    total_duplicate_files = sum(
-        len(group.images) - 1
-        for group in duplicate_groups
-    )
+    total_duplicate_files = sum(len(group.images) - 1 for group in duplicate_groups)
+    total_reclaimable = sum(group.reclaimable_bytes for group in duplicate_groups)
 
-    total_reclaimable = sum(
-        group.reclaimable_bytes
-        for group in duplicate_groups
-    )
-
-    print("SCAN SUMMARY")
-    print("-" * 70)
-    print(f"Directories scanned: {result.directories_scanned}")
-    print(f"Image files examined: {result.files_examined}")
-    print(f"Valid images: {result.total_images}")
-    print(f"Invalid images: {len(result.errors)}")
-    print(f"Total image size: {format_size(result.total_size_bytes)}")
-    print(f"Execution time: {result.duration_seconds:.2f} seconds")
+    reporter.print_section("SCAN SUMMARY", width)
+    reporter.print_scan_summary(result)
 
     print()
-    print("HYBRID ANALYSIS")
-    print("-" * 70)
+    reporter.print_section("HYBRID ANALYSIS", width)
     print(f"Exact duplicate groups: {len(duplicate_groups)}")
     print(f"Duplicate files: {total_duplicate_files}")
     print(f"Very high similarity pairs: {classification_counts['VERY_HIGH_SIMILARITY']}")
@@ -284,35 +261,26 @@ def run_analyze(
 
     if duplicate_groups:
         print()
-        print("EXACT DUPLICATES")
-        print("-" * 70)
+        reporter.print_section("EXACT DUPLICATES", width)
 
         for index, group in enumerate(duplicate_groups, start=1):
-            print()
-            print(f"GROUP {index}")
-            print(f"Files: {len(group.images)}")
-            print(f"Recoverable: {format_size(group.reclaimable_bytes)}")
-
-            for image in group.images:
-                relative_path = Path(image.path).relative_to(
-                    result.root_directory
-                )
-                print(f"  {relative_path}")
+            reporter.print_duplicate_group(
+                index,
+                group,
+                result.root_directory,
+                show_sha256=False,
+            )
 
     if similar_comparisons:
         print()
-        print("SIMILAR IMAGE PAIRS")
-        print("-" * 70)
+        reporter.print_section("SIMILAR IMAGE PAIRS", width)
 
-        for index, comparison in enumerate(
-            similar_comparisons,
-            start=1,
-        ):
-            image_a = Path(comparison.image_a.path).relative_to(
-                result.root_directory
+        for index, comparison in enumerate(similar_comparisons, start=1):
+            image_a = reporter.relative_path(
+                comparison.image_a.path, result.root_directory
             )
-            image_b = Path(comparison.image_b.path).relative_to(
-                result.root_directory
+            image_b = reporter.relative_path(
+                comparison.image_b.path, result.root_directory
             )
 
             print()
@@ -329,21 +297,106 @@ def run_analyze(
         print()
         print("No duplicate or similar images found.")
 
-    if result.errors:
-        print()
-        print("SCAN ERRORS")
-        print("-" * 70)
+    reporter.print_scan_errors(result, width)
+    reporter.print_footer("Hybrid analysis completed.", width)
 
-        for error in result.errors:
-            print(f"{error.path}: {error.message}")
+
+def run_dedupe(
+    directory: Path,
+    quarantine_directory: Path | None = None,
+    delete: bool = False,
+    apply: bool = False,
+    assume_yes: bool = False,
+) -> None:
+    scanner = ImageScanner()
+    kind = ActionKind.DELETE if delete else ActionKind.MOVE
+
+    reporter.print_header("PhotoSieve - Duplicate Cleanup")
+    print(f"Directory: {directory.expanduser().resolve()}")
+    print(f"Action: {kind.value.upper()}")
+    print(f"Mode: {'APPLY' if apply else 'DRY-RUN (no files will be changed)'}")
+
+    try:
+        result = scanner.scan(directory)
+        groups = find_exact_duplicates(result.images_found)
+
+        if kind is ActionKind.MOVE:
+            quarantine = quarantine_directory or default_quarantine_directory(
+                result.root_directory
+            )
+            print(f"Quarantine: {quarantine}")
+        else:
+            quarantine = None
+
+        actions = plan_duplicate_actions(
+            groups,
+            result.root_directory,
+            kind=kind,
+            quarantine_directory=quarantine,
+        )
+
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        print(f"Error: {error}")
+        return
 
     print()
-    print("=" * 70)
-    print("No files were modified or deleted.")
-    print("Hybrid analysis completed.")
+    reporter.print_section("PLAN")
+    print(f"Duplicate groups: {len(groups)}")
+    print(f"Files to {kind.value}: {len(actions)}")
+    print(
+        f"Space affected: {format_size(sum(a.target.size_bytes for a in actions))}"
+    )
+
+    for action in actions:
+        kept = reporter.relative_path(action.kept.path, result.root_directory)
+        target = reporter.relative_path(action.target.path, result.root_directory)
+        print()
+        print(f"  KEEP    {kept}")
+        print(f"  {kind.value.upper():<7} {target}")
+
+    if not actions:
+        print()
+        print("No exact duplicates found. Nothing to do.")
+        return
+
+    if not apply:
+        print()
+        print("=" * 60)
+        print("Dry-run: no files were modified. Use --apply to execute.")
+        return
+
+    if delete and not assume_yes:
+        answer = input(
+            f"\nPermanently DELETE {len(actions)} file(s)? This cannot be undone. [y/N] "
+        )
+
+        if answer.strip().lower() not in {"y", "yes", "s", "sim"}:
+            print("Cancelled. No files were modified.")
+            return
+
+    report = execute_actions(actions, kind=kind, apply=True)
+
+    print()
+    reporter.print_section("RESULT")
+    print(f"Files processed: {len(report.processed)}")
+    print(f"Space affected: {format_size(report.bytes_affected)}")
+    print(f"Failures: {len(report.failures)}")
+
+    for failure in report.failures:
+        print(f"  {failure.path}: {failure.message}")
+
+    print()
+    print("=" * 60)
+    print("Cleanup completed.")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="photosieve",
         description="Intelligent Photo Deduplication and Management Tool",
@@ -358,38 +411,26 @@ def main() -> None:
         "scan",
         help="Scan a directory and inventory its images",
     )
-
-    scan_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Directory containing images",
-    )
+    scan_parser.add_argument("directory", type=Path, help="Directory containing images")
 
     duplicate_parser = subparsers.add_parser(
         "duplicates",
         help="Find exact duplicate images using SHA-256",
     )
-
     duplicate_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Directory containing images",
+        "directory", type=Path, help="Directory containing images"
     )
 
     similar_parser = subparsers.add_parser(
         "similar",
         help="Find visually similar images using pHash",
     )
-
     similar_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Directory containing images",
+        "directory", type=Path, help="Directory containing images"
     )
-
     similar_parser.add_argument(
         "--threshold",
-        type=int,
+        type=_bounded_int(0, 64),
         default=6,
         help="Maximum Hamming distance (0-64, default: 6)",
     )
@@ -398,35 +439,62 @@ def main() -> None:
         "analyze",
         help="Run a complete hybrid image analysis",
     )
-
     analyze_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Directory containing images",
+        "directory", type=Path, help="Directory containing images"
     )
-
     analyze_parser.add_argument(
         "--phash-threshold",
-        type=int,
+        type=_bounded_int(0, 64),
         default=12,
         help="Maximum pHash distance for candidate pairs (0-64, default: 12)",
     )
-
     analyze_parser.add_argument(
         "--minimum-score",
-        type=float,
+        type=_score_range,
         default=0.70,
         help="Minimum hybrid similarity score (0.0-1.0, default: 0.70)",
     )
-
     analyze_parser.add_argument(
         "--workers",
-        type=int,
+        type=_bounded_int(1),
         default=4,
-        help="Maximum number of parallel workers (default: 4)",
+        help="Maximum number of parallel workers (>= 1, default: 4)",
     )
 
-    args = parser.parse_args()
+    dedupe_parser = subparsers.add_parser(
+        "dedupe",
+        help="Move (default) or delete exact duplicates, keeping one copy",
+    )
+    dedupe_parser.add_argument(
+        "directory", type=Path, help="Directory containing images"
+    )
+    dedupe_parser.add_argument(
+        "--quarantine-dir",
+        type=Path,
+        default=None,
+        help="Where duplicates are moved (default: sibling '<dir>_photosieve_duplicates')",
+    )
+    dedupe_parser.add_argument(
+        "--delete",
+        action="store_true",
+        help="Permanently delete duplicates instead of moving them",
+    )
+    dedupe_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually execute the plan (default is a dry-run)",
+    )
+    dedupe_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt when deleting",
+    )
+
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     if args.command == "scan":
         run_scan(args.directory)
@@ -443,6 +511,15 @@ def main() -> None:
             args.phash_threshold,
             args.minimum_score,
             args.workers,
+        )
+
+    elif args.command == "dedupe":
+        run_dedupe(
+            args.directory,
+            quarantine_directory=args.quarantine_dir,
+            delete=args.delete,
+            apply=args.apply,
+            assume_yes=args.yes,
         )
 
 
