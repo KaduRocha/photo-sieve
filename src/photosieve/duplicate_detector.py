@@ -2,7 +2,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 
-from photosieve.hasher import calculate_sha256
+from photosieve.comparison.analysis_cache import ImageAnalysisCache
 from photosieve.scanner import ImageInfo
 
 
@@ -28,7 +28,15 @@ class DuplicateGroup:
 
 def find_exact_duplicates(
     images: list[ImageInfo],
+    cache: ImageAnalysisCache | None = None,
 ) -> list[DuplicateGroup]:
+    """
+    Encontra grupos de arquivos binariamente idênticos.
+
+    Se um `ImageAnalysisCache` for informado, os SHA-256 calculados
+    aqui são reaproveitados por outras etapas (ex.: análise híbrida).
+    """
+    analysis_cache = cache or ImageAnalysisCache()
 
     # First stage: group images by file size.
     size_groups = defaultdict(list)
@@ -47,7 +55,7 @@ def find_exact_duplicates(
         hash_groups = defaultdict(list)
 
         for image in candidates:
-            file_hash = calculate_sha256(image.path)
+            file_hash = analysis_cache.get_sha256(image)
             hash_groups[file_hash].append(image)
 
         # Keep only groups with actual binary duplicates.

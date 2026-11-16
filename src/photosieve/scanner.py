@@ -7,16 +7,7 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-SUPPORTED_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".gif",
-}
+from photosieve.formats import SUPPORTED_EXTENSIONS
 
 
 @dataclass
@@ -111,7 +102,12 @@ class ImageScanner:
 
                     result.images_found.append(image_info)
 
-                except (OSError, ValueError, UnidentifiedImageError) as error:
+                except (
+                    OSError,
+                    ValueError,
+                    UnidentifiedImageError,
+                    Image.DecompressionBombError,
+                ) as error:
                     result.errors.append(
                         ScanError(
                             path=str(file_path),

@@ -94,19 +94,15 @@ def test_prevents_transitive_chaining(monkeypatch):
         SimpleNamespace(path="c.png"),
     ]
 
-    distances = {
-        ("a.png", "b.png"): 1,
-        ("a.png", "c.png"): 10,
-        ("b.png", "c.png"): 1,
-    }
+    # Distâncias de Hamming: a-b = 1, b-c = 1, a-c = 2 (> limiar 1).
+    values = {"a.png": 0b00, "b.png": 0b01, "c.png": 0b11}
 
     class FakeHash:
         def __init__(self, path):
-            self.path = path
+            self.value = values[path]
 
-        def __sub__(self, other):
-            key = tuple(sorted((self.path, other.path)))
-            return distances[key]
+        def __str__(self):
+            return f"{self.value:016x}"
 
     monkeypatch.setattr(
         detector,
@@ -116,7 +112,7 @@ def test_prevents_transitive_chaining(monkeypatch):
 
     groups = find_similarity_groups(
         images,
-        threshold=2,
+        threshold=1,
     )
 
     assert len(groups) == 1

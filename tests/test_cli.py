@@ -41,6 +41,7 @@ def test_analyze_command_accepts_custom_parameters(monkeypatch):
         phash_threshold,
         minimum_score,
         workers,
+        **kwargs,
     ):
         captured["directory"] = directory
         captured["phash_threshold"] = phash_threshold
@@ -75,6 +76,7 @@ def test_analyze_command_uses_default_workers(monkeypatch):
         phash_threshold,
         minimum_score,
         workers,
+        **kwargs,
     ):
         captured["workers"] = workers
 

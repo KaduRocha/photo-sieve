@@ -60,3 +60,20 @@ def test_scan_calculates_total_size(tmp_path):
     expected_size = (image_dir / "photo.jpg").stat().st_size
 
     assert result.total_size_bytes == expected_size
+
+
+def test_decompression_bomb_is_reported_instead_of_crashing(tmp_path, monkeypatch):
+    from PIL import Image
+
+    from tests.conftest import make_image
+
+    make_image(tmp_path / "ok.png", "red", size=(2, 2))
+    make_image(tmp_path / "huge.png", "blue", size=(100, 100))
+
+    # Limite artificialmente baixo: 100x100 excede o dobro do limite.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
+
+    result = ImageScanner().scan(tmp_path)
+
+    assert [i.filename for i in result.images_found] == ["ok.png"]
+    assert [e.path.endswith("huge.png") for e in result.errors] == [True]

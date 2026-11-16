@@ -1,6 +1,6 @@
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from photosieve.comparison.analysis_cache import ImageAnalysisCache
 from photosieve.comparison.color_analyzer import compare_color_histograms
@@ -18,6 +18,15 @@ VERY_HIGH_THRESHOLD = 0.95
 HIGH_THRESHOLD = 0.85
 POSSIBLE_THRESHOLD = 0.70
 
+# Detecção de recortes: distância máxima entre o pHash global de uma imagem
+# e o de uma janela interna da outra, e penalidade aplicada à distância
+# efetiva (um recorte nunca é tão confiável quanto uma cópia redimensionada).
+CROP_PHASH_THRESHOLD = 8
+CROP_PENALTY = 4
+
+# Rotações/espelhamentos: pequena penalidade, pois são cópias fiéis do conteúdo.
+TRANSFORM_PENALTY = 2
+
 
 @dataclass
 class HybridComparison:
@@ -29,6 +38,10 @@ class HybridComparison:
     color_similarity: float
     metadata_similarity: float
     is_exact_duplicate: bool
+    crop_distance: int | None = None
+    is_crop_match: bool = False
+    transform_distance: int | None = None
+    is_transform_match: bool = False
 
     @property
     def similarity_percent(self) -> float:
@@ -85,14 +98,48 @@ def _classify_similarity(
 
 
 
+def _calculate_crop_distance(
+    phash_a,
+    phash_b,
+    windows_a: list,
+    windows_b: list,
+) -> int:
+    """
+    Menor distância entre o pHash global de uma imagem e as janelas
+    internas da outra, nos dois sentidos (A recorte de B ou B recorte de A).
+    """
+    distances = [int(phash_a - window) for window in windows_b]
+    distances.extend(int(phash_b - window) for window in windows_a)
+
+    return min(distances)
+
+
+def _calculate_transform_distance(
+    phash_a,
+    transformed_b: list,
+) -> int:
+    """Menor distância entre o pHash de A e as variantes giradas/espelhadas de B."""
+    return min(int(phash_a - variant) for variant in transformed_b)
+
+
 def compare_images(
     image_a: ImageInfo,
     image_b: ImageInfo,
     cache: ImageAnalysisCache | None = None,
+    detect_crops: bool = False,
+    crop_threshold: int = CROP_PHASH_THRESHOLD,
+    detect_transforms: bool = False,
 ) -> HybridComparison:
     """
     Compare two images using cached SHA-256, pHash,
     color histogram and metadata results.
+
+    Com `detect_crops=True`, um recorte de uma imagem na outra também é
+    reconhecido: a distância pHash efetiva passa a ser a da melhor janela
+    (mais uma penalidade), caso seja menor que a distância global.
+
+    Com `detect_transforms=True`, uma imagem girada (90/180/270) ou espelhada
+    também é reconhecida, comparando o pHash de uma com as variantes da outra.
     """
     analysis_cache = cache or ImageAnalysisCache()
 
@@ -134,8 +181,57 @@ def compare_images(
         metadata_b,
     )
 
+    crop_distance = None
+    is_crop_match = False
+    effective_distance = phash_distance
+
+    if detect_crops:
+        crop_distance = _calculate_crop_distance(
+            phash_a,
+            phash_b,
+            analysis_cache.get_window_phashes(image_a),
+            analysis_cache.get_window_phashes(image_b),
+        )
+
+        if (
+            crop_distance <= crop_threshold
+            and crop_distance + CROP_PENALTY < phash_distance
+        ):
+            effective_distance = crop_distance + CROP_PENALTY
+            is_crop_match = True
+
+    transform_distance = None
+    is_transform_match = False
+
+    if detect_transforms:
+        transform_distance = _calculate_transform_distance(
+            phash_a,
+            analysis_cache.get_transform_phashes(image_b),
+        )
+
+        if transform_distance + TRANSFORM_PENALTY < effective_distance:
+            effective_distance = transform_distance + TRANSFORM_PENALTY
+            is_transform_match = True
+            is_crop_match = False
+
+            # Uma rotação de 90° inverte a proporção: aceita a razão invertida.
+            metadata_similarity = max(
+                metadata_similarity,
+                _calculate_metadata_similarity(
+                    metadata_a,
+                    replace(
+                        metadata_b,
+                        aspect_ratio=(
+                            1 / metadata_b.aspect_ratio
+                            if metadata_b.aspect_ratio > 0
+                            else 0.0
+                        ),
+                    ),
+                ),
+            )
+
     phash_similarity = (
-        HASH_BITS - phash_distance
+        HASH_BITS - effective_distance
     ) / HASH_BITS
 
     similarity_score = (
@@ -160,6 +256,10 @@ def compare_images(
         color_similarity=color_similarity,
         metadata_similarity=metadata_similarity,
         is_exact_duplicate=False,
+        crop_distance=crop_distance,
+        is_crop_match=is_crop_match,
+        transform_distance=transform_distance,
+        is_transform_match=is_transform_match,
     )
 
 def _to_integer_hash(image_hash) -> int:
@@ -168,6 +268,64 @@ def _to_integer_hash(image_hash) -> int:
         return image_hash
 
     return int(str(image_hash), 16)
+
+def _find_crop_candidate_pairs(
+    hashes: list,
+    window_hashes: list[list],
+    crop_threshold: int,
+) -> set[tuple[int, int]]:
+    """
+    Pares em que o pHash global de uma imagem é próximo de uma janela
+    interna de outra (possível recorte), usando uma BK-Tree das janelas.
+    """
+    index = BKTree()
+
+    for image_index, windows in enumerate(window_hashes):
+        for window in windows:
+            index.add(_to_integer_hash(window), image_index)
+
+    pairs = set()
+
+    for index_a, image_hash in enumerate(hashes):
+        matches = index.search(
+            _to_integer_hash(image_hash),
+            max_distance=crop_threshold,
+        )
+
+        for index_b, _ in matches:
+            if index_b != index_a:
+                pairs.add((min(index_a, index_b), max(index_a, index_b)))
+
+    return pairs
+
+
+def _find_transform_candidate_pairs(
+    hashes: list,
+    transform_hashes: list[list],
+    phash_threshold: int,
+) -> set[tuple[int, int]]:
+    """
+    Pares em que o pHash de uma imagem é próximo de uma variante girada
+    ou espelhada de outra, usando uma BK-Tree das variantes.
+    """
+    index = BKTree()
+
+    for image_index, variants in enumerate(transform_hashes):
+        for variant in variants:
+            index.add(_to_integer_hash(variant), image_index)
+
+    pairs = set()
+
+    for index_a, image_hash in enumerate(hashes):
+        for index_b, _ in index.search(
+            _to_integer_hash(image_hash),
+            max_distance=phash_threshold,
+        ):
+            if index_b != index_a:
+                pairs.add((min(index_a, index_b), max(index_a, index_b)))
+
+    return pairs
+
 
 def _find_candidate_pairs(
     hashes: list,
@@ -235,6 +393,9 @@ def find_hybrid_similarities(
     minimum_score: float = POSSIBLE_THRESHOLD,
     cache: ImageAnalysisCache | None = None,
     max_workers: int = 4,
+    detect_crops: bool = False,
+    crop_threshold: int = CROP_PHASH_THRESHOLD,
+    detect_transforms: bool = False,
 ) -> list[HybridComparison]:
     """
     Find potentially similar image pairs using hybrid analysis.
@@ -257,6 +418,11 @@ def find_hybrid_similarities(
 
     if max_workers < 1:
         raise ValueError("Maximum workers must be at least 1.")
+
+    if not 0 <= crop_threshold <= HASH_BITS:
+        raise ValueError(
+            f"Crop threshold must be between 0 and {HASH_BITS}."
+        )
 
     if len(images) < 2:
         return []
@@ -283,6 +449,32 @@ def find_hybrid_similarities(
         phash_threshold=phash_threshold,
     )
 
+    if detect_crops:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            window_hashes = list(
+                executor.map(analysis_cache.get_window_phashes, images)
+            )
+
+        candidate_pairs = sorted(
+            set(candidate_pairs)
+            | _find_crop_candidate_pairs(
+                hashes, window_hashes, crop_threshold
+            )
+        )
+
+    if detect_transforms:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            transform_hashes = list(
+                executor.map(analysis_cache.get_transform_phashes, images)
+            )
+
+        candidate_pairs = sorted(
+            set(candidate_pairs)
+            | _find_transform_candidate_pairs(
+                hashes, transform_hashes, phash_threshold
+            )
+        )
+
     if not candidate_pairs:
         return []
 
@@ -294,6 +486,9 @@ def find_hybrid_similarities(
             images[index_a],
             images[index_b],
             cache=analysis_cache,
+            detect_crops=detect_crops,
+            crop_threshold=crop_threshold,
+            detect_transforms=detect_transforms,
         )
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
