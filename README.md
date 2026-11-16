@@ -25,7 +25,7 @@ pip install -e ".[dev]"      # ou: pip install -r requirements.txt
 |---|---|
 | `photosieve scan DIR` | Inventário das imagens (formato, dimensões, tamanho) |
 | `photosieve duplicates DIR` | Duplicatas **exatas** (SHA-256) |
-| `photosieve similar DIR [--threshold 0-64]` | Agrupa imagens semelhantes por pHash (complete-link, O(n²)) |
+| `photosieve similar DIR [--threshold 0-64]` | Agrupa imagens semelhantes por pHash (complete-link, com índice BK-Tree) |
 | `photosieve analyze DIR [opções]` | Análise híbrida completa (recomendada) |
 | `photosieve dedupe DIR [opções]` | Move ou exclui duplicatas, mantendo uma cópia |
 
@@ -41,6 +41,7 @@ Os comandos `scan`, `duplicates`, `similar` e `analyze` **nunca alteram arquivos
 | `--report ARQ` | Exporta o resultado; o formato vem da extensão: `.json`, `.csv` ou `.html` |
 | `--detect-crops` | Também detecta imagens que são **recortes** de outras (mais lento) |
 | `--crop-threshold 0-64` | Sensibilidade da detecção de recortes (padrão 8) |
+| `--detect-transforms` | Também detecta cópias **giradas** (90/180/270) e **espelhadas** |
 | `--cache-db ARQ` / `--no-cache` | Cache SQLite (padrão `~/.cache/photosieve/cache.db`) ou desativá-lo |
 
 ### Cache persistente
@@ -82,7 +83,8 @@ de **maior qualidade** (maior resolução, depois maior arquivo). Regras extras:
 - O agrupamento é em estrela: uma imagem só é removida se tiver um par *direto*
   com a mantida, o que evita encadear A≈B≈C. Uma imagem já destinada à
   quarentena nunca atua como representante de outra.
-- Aceita `--detect-crops`, `--phash-threshold`, `--workers` e as opções de cache.
+- Pares detectados como **recorte** nunca entram no plano (ver "Detecção de recortes"); só os demais são movidos.
+- Aceita `--detect-crops`, `--detect-transforms`, `--phash-threshold`, `--workers` e as opções de cache.
 
 ```bash
 photosieve dedupe ~/Fotos --similar                  # revisar o plano
@@ -99,21 +101,26 @@ photosieve dedupe ~/Fotos --similar --apply
 
 ## Detecção de recortes (`--detect-crops`)
 
-Para cada imagem são calculados pHashes de 150 janelas internas (grade 5×5 em 6
-escalas). Se o pHash global de uma imagem é próximo ao de uma janela de outra,
+Para cada imagem são calculados pHashes de 204 janelas internas (grade 5×5 em 6
+escalas com proporção preservada, mais 6 formatos de proporção livre em grade 3×3). Se o pHash global de uma imagem é próximo ao de uma janela de outra,
 o par é candidato; a pontuação usa a distância da janela mais uma penalidade.
 
-Medido com recortes aleatórios (escala 65–90%) de 4 fotos reais, limiar padrão 8:
+Medido com recortes aleatórios (escala 65–90%) de 8 fotos reais, limiar padrão 8
+(10 recortes por foto, proporção **livre**, o caso comum):
 
-| Tipo de recorte | Detectados |
-|---|---|
-| Proporção preservada | 36/40 (90%) |
-| Proporção **livre** (o caso comum) | 25/40 (62%); 32/40 no limiar 10; 37/40 no limiar 12 |
+| Conjunto de janelas | Janelas | Detectados |
+|---|---|---|
+| Só proporção preservada (anterior) | 150 | 47/80 (59%) |
+| Com formatos livres (atual) | 204 | 55/80 (69%) |
+| Mais formatos/posições (descartado, custo > 2×) | 342 | 59/80 (74%) |
 
 - Aumentar `--crop-threshold` melhora o recall, mas também o risco de falsos
   positivos. No benchmark sintético (500 imagens) houve 0 falsos positivos nos
-  limiares 8, 10 e 12. Em `~/Pictures` o modo apontou 1 par único como recorte
-  que **não foi verificado visualmente**: revise com `--report arquivo.html`.
+  limiares 8, 10 e 12. Em uma biblioteca real de 315 fotos
+  (com muitas rajadas), porém, **a maioria dos pares marcados como recorte eram
+  fotos diferentes da mesma cena/pose**, conferidas visualmente em amostra: o
+  filtro por janela é permissivo. Por isso `dedupe --similar` **ignora** pares de
+  recorte; use `analyze --report arquivo.html` e revise manualmente.
 - É mais lento e usa mais memória (centenas de hashes por imagem); o cache
   persistente evita recalcular. Para bibliotecas muito grandes, prefira
   executar sem `--detect-crops` primeiro.
@@ -129,9 +136,10 @@ detectadas em 12/12 pares **sem** a detecção de recortes.
   parecidas; é o filtro de pHash que evita falsos positivos.
 - O benchmark sintético (`data/benchmark_500`, F1 = 1,0) é fácil e **não**
   representa fotos reais; ele não contém recortes.
-- Rotações e espelhamentos (além da orientação EXIF) não são tratados.
-- `similar` ainda compara todos contra todos (O(n²)); para bibliotecas grandes
-  use `analyze`.
+- Rotações e espelhamentos só são detectados com `--detect-transforms` (0 falsos
+  positivos em 315 fotos reais; custo: 7 pHashes extras por imagem).
+- Ângulos de rotação arbitrários (ex.: 15°) não são tratados.
+- Recortes: ver a ressalva sobre falsos positivos acima.
 - O suporte a HEIC foi testado com `pillow-heif` 1.8.1 em Linux.
 
 ## Benchmark sintético
@@ -159,14 +167,14 @@ src/photosieve/
 ├── reporter.py          # formatação da saída
 ├── scanner.py           # varredura e validação de imagens
 ├── hasher.py            # SHA-256 incremental
-├── image_analyzer.py    # pHash
+├── image_analyzer.py    # pHash, janelas (recortes) e variantes (rotação/espelho)
 ├── duplicate_detector.py
 ├── similarity_detector.py
 ├── formats.py           # suporte opcional a HEIC/HEIF
 ├── report_exporter.py   # relatórios JSON/CSV/HTML
 ├── file_manager.py      # plano e execução de mover/excluir (exatas e semelhantes)
 └── comparison/          # análise híbrida (BK-Tree, cache em memória e SQLite,
-                         #  cor, metadados, recortes)
+                         #  cor, metadados, recortes, rotações)
 ```
 
 ## Licença
