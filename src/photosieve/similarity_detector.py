@@ -1,6 +1,7 @@
 
 from dataclasses import dataclass
 
+from photosieve.comparison.phash_index import BKTree
 from photosieve.image_analyzer import calculate_phash
 from photosieve.scanner import ImageInfo
 
@@ -49,17 +50,25 @@ def find_similarity_groups(
         for image in images
     ]
 
+    # Índice BK-Tree: só os pares dentro do limiar são materializados,
+    # evitando o custo O(n²) de comparar todos contra todos.
+    index = BKTree()
+
+    for position, image_hash in enumerate(hashes):
+        index.add(int(str(image_hash), 16), position)
+
     distances = {}
     candidate_pairs = []
 
-    # Calculate the Hamming distance between every pair.
-    for i in range(len(images)):
-        for j in range(i + 1, len(images)):
-            distance = hashes[i] - hashes[j]
+    for i, image_hash in enumerate(hashes):
+        matches = index.search(
+            int(str(image_hash), 16),
+            max_distance=threshold,
+        )
 
-            distances[(i, j)] = distance
-
-            if distance <= threshold:
+        for j, distance in matches:
+            if j > i:
+                distances[(i, j)] = distance
                 candidate_pairs.append((distance, i, j))
 
     # Process the closest pairs first.
@@ -72,7 +81,6 @@ def find_similarity_groups(
     }
 
     cluster_ids = list(range(len(images)))
-    # next_cluster_id = len(images)
 
     for _, index_a, index_b in candidate_pairs:
         cluster_a = cluster_ids[index_a]
@@ -86,10 +94,9 @@ def find_similarity_groups(
 
         # Complete-link rule:
         # Every cross-cluster pair must satisfy the threshold.
+        # Pares ausentes de `distances` estão acima do limiar.
         can_merge = all(
-            distances[
-                (min(a, b), max(a, b))
-            ] <= threshold
+            (min(a, b), max(a, b)) in distances
             for a in members_a
             for b in members_b
         )
@@ -103,8 +110,6 @@ def find_similarity_groups(
 
         for member in members_b:
             cluster_ids[member] = cluster_a
-
-        # next_cluster_id += 1
 
     groups = []
 
