@@ -123,3 +123,16 @@ def test_choose_best_quality_is_deterministic(library):
         choose_best_quality(result.images_found).filename
         == choose_best_quality(list(reversed(result.images_found))).filename
     )
+
+
+def test_crop_matches_are_never_planned(library, tmp_path):
+    from dataclasses import replace
+
+    directory, _, comparisons = library
+    as_crop = [replace(c, is_crop_match=True) for c in comparisons]
+
+    actions = plan_similar_actions(
+        as_crop, directory, quarantine_directory=tmp_path / "q", minimum_score=0.0
+    )
+
+    assert actions == []

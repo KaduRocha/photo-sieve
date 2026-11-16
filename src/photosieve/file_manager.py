@@ -137,6 +137,10 @@ def plan_similar_actions(
     Usa agrupamento em estrela: cada imagem mantida só remove imagens que
     têm um par DIRETO com ela acima de `minimum_score`. Isso evita
     encadeamento (A≈B e B≈C não implica A≈C).
+
+    Pares detectados como *recorte* nunca entram no plano: em fotos reais,
+    rajadas da mesma cena produzem muitos falsos positivos nessa detecção,
+    então eles ficam apenas para revisão manual (relatório do `analyze`).
     """
     if not 0.0 <= minimum_score <= 1.0:
         raise ValueError("Minimum score must be between 0.0 and 1.0.")
@@ -157,6 +161,9 @@ def plan_similar_actions(
     neighbors: dict[str, dict[str, HybridComparison]] = {}
 
     for comparison in comparisons:
+        if comparison.is_crop_match:
+            continue
+
         if not (
             comparison.is_exact_duplicate
             or comparison.similarity_score >= minimum_score
