@@ -202,6 +202,7 @@ def run_analyze(
     report_path: Path | None = None,
     detect_crops: bool = False,
     crop_threshold: int = CROP_PHASH_THRESHOLD,
+    detect_transforms: bool = False,
 ) -> None:
     scanner = ImageScanner()
     width = 70
@@ -211,6 +212,7 @@ def run_analyze(
     print(f"Directory: {directory.expanduser().resolve()}")
     print(f"Parallel workers: {workers}")
     print(f"Crop detection: {'on' if detect_crops else 'off'}")
+    print(f"Rotation/mirror detection: {'on' if detect_transforms else 'off'}")
     print(f"Persistent cache: {cache_path if cache_path else 'off'}")
     print("Scanning images and analyzing similarities...")
     print()
@@ -247,6 +249,7 @@ def run_analyze(
             max_workers=workers,
             detect_crops=detect_crops,
             crop_threshold=crop_threshold,
+            detect_transforms=detect_transforms,
         )
 
     except (
@@ -327,6 +330,11 @@ def run_analyze(
             print(f"Metadata similarity: {comparison.metadata_similarity:.2%}")
             if comparison.is_crop_match:
                 print(f"Crop match: yes (window distance {comparison.crop_distance}/64)")
+            if comparison.is_transform_match:
+                print(
+                    "Rotation/mirror match: yes "
+                    f"(variant distance {comparison.transform_distance}/64)"
+                )
             print(f"  {image_a}")
             print(f"  {image_b}")
 
@@ -347,6 +355,7 @@ def run_analyze(
                         "workers": workers,
                         "detect_crops": detect_crops,
                         "crop_threshold": crop_threshold,
+                        "detect_transforms": detect_transforms,
                     },
                     scan=result,
                     duplicate_groups=duplicate_groups,
@@ -375,6 +384,7 @@ def run_dedupe(
     cache_path: Path | None = None,
     detect_crops: bool = False,
     crop_threshold: int = CROP_PHASH_THRESHOLD,
+    detect_transforms: bool = False,
 ) -> None:
     scanner = ImageScanner()
     kind = ActionKind.DELETE if delete else ActionKind.MOVE
@@ -418,6 +428,7 @@ def run_dedupe(
                 max_workers=workers,
                 detect_crops=detect_crops,
                 crop_threshold=crop_threshold,
+                detect_transforms=detect_transforms,
             )
             actions = plan_similar_actions(
                 comparisons,
@@ -529,6 +540,14 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_transform_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--detect-transforms",
+        action="store_true",
+        help="Also detect rotated (90/180/270) and mirrored copies of images",
+    )
+
+
 def _add_cache_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--cache-db",
@@ -618,6 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write a report; format by extension: .json, .csv or .html",
     )
     _add_crop_arguments(analyze_parser)
+    _add_transform_arguments(analyze_parser)
     _add_cache_arguments(analyze_parser)
 
     dedupe_parser = subparsers.add_parser(
@@ -673,6 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of parallel workers (>= 1, default: 4)",
     )
     _add_crop_arguments(dedupe_parser)
+    _add_transform_arguments(dedupe_parser)
     _add_cache_arguments(dedupe_parser)
 
     return parser
@@ -700,6 +721,7 @@ def main() -> None:
             report_path=args.report,
             detect_crops=args.detect_crops,
             crop_threshold=args.crop_threshold,
+            detect_transforms=args.detect_transforms,
         )
 
     elif args.command == "dedupe":
@@ -716,6 +738,7 @@ def main() -> None:
             cache_path=_cache_path(args),
             detect_crops=args.detect_crops,
             crop_threshold=args.crop_threshold,
+            detect_transforms=args.detect_transforms,
         )
 
 

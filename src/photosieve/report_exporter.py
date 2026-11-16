@@ -109,6 +109,8 @@ def build_json_data(report: AnalysisReport) -> dict:
                 "metadata_similarity": round(c.metadata_similarity, 4),
                 "is_crop_match": c.is_crop_match,
                 "crop_distance": c.crop_distance,
+                "is_transform_match": c.is_transform_match,
+                "transform_distance": c.transform_distance,
                 "suggested_keep": _rel(
                     report, _best_of(c.image_a, c.image_b).path
                 ),
@@ -141,6 +143,7 @@ CSV_COLUMNS = [
     "color_similarity",
     "metadata_similarity",
     "is_crop_match",
+    "is_transform_match",
     "path_a",
     "path_b",
     "suggested_keep",
@@ -186,6 +189,7 @@ def build_csv(report: AnalysisReport) -> str:
                 round(c.color_similarity, 4),
                 round(c.metadata_similarity, 4),
                 c.is_crop_match,
+                c.is_transform_match,
                 _csv_safe(_rel(report, c.image_a.path)),
                 _csv_safe(_rel(report, c.image_b.path)),
                 _csv_safe(_rel(report, _best_of(c.image_a, c.image_b).path)),
@@ -289,6 +293,8 @@ def build_html(report: AnalysisReport) -> str:
     for index, c in enumerate(report.similar_comparisons, start=1):
         best = _best_of(c.image_a, c.image_b)
         crop = "<span class='tag'>recorte</span>" if c.is_crop_match else ""
+        if c.is_transform_match:
+            crop += "<span class='tag'>girada/espelhada</span>"
         parts.append(
             f"<div class='card'><b>Par {index}</b> · {c.similarity_percent:.2f}% "
             f"<span class='tag'>{esc(c.classification)}</span>{crop}"

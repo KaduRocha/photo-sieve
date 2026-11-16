@@ -34,6 +34,22 @@ def calculate_phash(
 # medido em recortes aleatórios de fotos reais (ver README).
 CROP_SCALES = (0.9, 0.85, 0.8, 0.75, 0.7, 0.65)
 CROP_WINDOW_POSITIONS = 5  # grade 5x5 por escala
+
+# Janelas de proporção livre (escala diferente em cada eixo), pois recortes
+# manuais raramente preservam a proporção. Grade 3x3 por formato.
+CROP_FREE_SHAPES = tuple(
+    (width_scale, height_scale)
+    for width_scale in (0.9, 0.8, 0.7)
+    for height_scale in (0.9, 0.8, 0.7)
+    if width_scale != height_scale
+)
+CROP_FREE_POSITIONS = 3
+
+# Janelas por imagem: 6 escalas x 5x5 + 6 formatos livres x 3x3.
+CROP_WINDOW_COUNT = (
+    len(CROP_SCALES) * CROP_WINDOW_POSITIONS**2
+    + len(CROP_FREE_SHAPES) * CROP_FREE_POSITIONS**2
+)
 CROP_ANALYSIS_SIZE = 256
 
 
@@ -59,16 +75,22 @@ def calculate_window_phashes(
 
         width, height = normalized_image.size
 
+        shapes = [(scale, scale, CROP_WINDOW_POSITIONS) for scale in CROP_SCALES]
+        shapes += [
+            (width_scale, height_scale, CROP_FREE_POSITIONS)
+            for width_scale, height_scale in CROP_FREE_SHAPES
+        ]
+
         hashes = []
 
-        for scale in CROP_SCALES:
-            window_width = max(1, round(width * scale))
-            window_height = max(1, round(height * scale))
+        for width_scale, height_scale, positions in shapes:
+            window_width = max(1, round(width * width_scale))
+            window_height = max(1, round(height * height_scale))
 
-            for row in range(CROP_WINDOW_POSITIONS):
-                for column in range(CROP_WINDOW_POSITIONS):
-                    left = round((width - window_width) * column / (CROP_WINDOW_POSITIONS - 1))
-                    top = round((height - window_height) * row / (CROP_WINDOW_POSITIONS - 1))
+            for row in range(positions):
+                for column in range(positions):
+                    left = round((width - window_width) * column / (positions - 1))
+                    top = round((height - window_height) * row / (positions - 1))
 
                     window = normalized_image.crop(
                         (left, top, left + window_width, top + window_height)
@@ -77,3 +99,43 @@ def calculate_window_phashes(
                     hashes.append(imagehash.phash(window, hash_size=hash_size))
 
         return hashes
+
+
+# Transformações geométricas (além da identidade) testadas na detecção de
+# rotações e espelhamentos: os 7 elementos restantes do grupo diedral D4.
+TRANSFORMS = (
+    Image.Transpose.ROTATE_90,
+    Image.Transpose.ROTATE_180,
+    Image.Transpose.ROTATE_270,
+    Image.Transpose.FLIP_LEFT_RIGHT,
+    Image.Transpose.FLIP_TOP_BOTTOM,
+    Image.Transpose.TRANSPOSE,
+    Image.Transpose.TRANSVERSE,
+)
+
+
+def calculate_transform_phashes(
+    file_path: str | Path,
+    hash_size: int = 8,
+) -> list[imagehash.ImageHash]:
+    """
+    Calcula o pHash da imagem rotacionada (90/180/270) e espelhada.
+
+    Se a imagem B é a A girada ou espelhada, o pHash de B tende a ser
+    próximo ao de alguma dessas variantes de A.
+    """
+    path = Path(file_path)
+
+    with Image.open(path) as image:
+        image.seek(0)
+
+        normalized_image = ImageOps.exif_transpose(image)
+        normalized_image = normalized_image.convert("RGB")
+
+        return [
+            imagehash.phash(
+                normalized_image.transpose(transform),
+                hash_size=hash_size,
+            )
+            for transform in TRANSFORMS
+        ]

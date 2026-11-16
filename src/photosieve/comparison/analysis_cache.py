@@ -18,7 +18,11 @@ from photosieve.comparison.metadata_analyzer import (
 )
 from photosieve.comparison.persistent_store import PersistentStore
 from photosieve.hasher import calculate_sha256
-from photosieve.image_analyzer import calculate_phash, calculate_window_phashes
+from photosieve.image_analyzer import (
+    calculate_phash,
+    calculate_transform_phashes,
+    calculate_window_phashes,
+)
 from photosieve.scanner import ImageInfo
 
 T = TypeVar("T")
@@ -63,6 +67,7 @@ class ImageAnalysisCache:
         self._histogram_cache: dict[tuple, ColorHistogram] = {}
         self._metadata_cache: dict[tuple, ImageMetadata] = {}
         self._window_cache: dict[tuple, list[imagehash.ImageHash]] = {}
+        self._transform_cache: dict[tuple, list[imagehash.ImageHash]] = {}
 
         self._lock = Lock()
         self._feature_locks = [
@@ -174,9 +179,25 @@ class ImageAnalysisCache:
         """pHash de janelas internas, usado na detecção de recortes."""
         return self._get_or_compute(
             self._window_cache,
-            "window_phashes",
+            "window_phashes_v2",  # v2: inclui janelas de proporção livre
             image,
             lambda: calculate_window_phashes(image.path),
+            encode=lambda hashes: json.dumps([str(h) for h in hashes]),
+            decode=lambda text: [
+                imagehash.hex_to_hash(item) for item in json.loads(text)
+            ],
+        )
+
+    def get_transform_phashes(
+        self,
+        image: ImageInfo,
+    ) -> list[imagehash.ImageHash]:
+        """pHash das variantes giradas/espelhadas, usado em --detect-transforms."""
+        return self._get_or_compute(
+            self._transform_cache,
+            "transform_phashes",
+            image,
+            lambda: calculate_transform_phashes(image.path),
             encode=lambda hashes: json.dumps([str(h) for h in hashes]),
             decode=lambda text: [
                 imagehash.hex_to_hash(item) for item in json.loads(text)
@@ -191,3 +212,4 @@ class ImageAnalysisCache:
             self._histogram_cache.clear()
             self._metadata_cache.clear()
             self._window_cache.clear()
+            self._transform_cache.clear()
