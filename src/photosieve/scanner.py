@@ -102,7 +102,12 @@ class ImageScanner:
 
                     result.images_found.append(image_info)
 
-                except (OSError, ValueError, UnidentifiedImageError) as error:
+                except (
+                    OSError,
+                    ValueError,
+                    UnidentifiedImageError,
+                    Image.DecompressionBombError,
+                ) as error:
                     result.errors.append(
                         ScanError(
                             path=str(file_path),
